@@ -26,24 +26,23 @@ time.sleep(5)
 
 def get_latest_pdf_link():
     try:
-        # Find all PDF links on the page
+        # Find all PDF links containing "primary-ready-reckoner-"
         pdf_elements = WebDriverWait(driver, 10).until(
-            EC.presence_of_all_elements_located((By.XPATH, "//a[contains(@href, '.pdf')]"))
+            EC.presence_of_all_elements_located((By.XPATH, "//a[contains(@href, '.pdf') and contains(@href, 'primary-ready-reckoner-')]"))
         )
-        
+
         if not pdf_elements:
-            print("❌ No PDF links found on the page.")
+            print("❌ No matching PDF links found.")
             return None
 
-        # Pick the first PDF link (assuming it's the latest)
-        latest_pdf = pdf_elements[0].get_attribute("href")
-        print(f"✅ Found latest PDF: {latest_pdf}")
-        return latest_pdf
+        # Return the first PDF (assumed to be the latest)
+        latest_pdf_url = pdf_elements[0].get_attribute("href")
+        print(f"✅ Found latest PDF: {latest_pdf_url}")
+        return latest_pdf_url
 
     except Exception as e:
         print(f"❌ Error occurred while fetching PDF links: {e}")
         return None
-
 def is_new_pdf(pdf_url):
     if os.path.exists(PDF_LOG_FILE):
         with open(PDF_LOG_FILE, "r") as f:
