@@ -25,3 +25,9 @@ jobs:
 
       - name: ▶️ Run Hindalco downloader
         run: python hindalco_downloader.py
+
+      - name: 📤 Upload downloaded PDF
+        uses: actions/upload-artifact@v3
+        with:
+          name: hindalco-pdf
+          path: hindalco_downloads/*.pdf
