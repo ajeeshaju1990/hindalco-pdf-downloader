@@ -26,7 +26,7 @@ time.sleep(5)
 
 def get_latest_pdf_link():
     today = datetime.today()
-    for day in range(15, 0, -1):
+    for day in range(15, 0, -5):
         date_str = f"{day:02d}.{today.month:02d}.{today.year}"
         try:
             pdf_element = WebDriverWait(driver, 10).until(
