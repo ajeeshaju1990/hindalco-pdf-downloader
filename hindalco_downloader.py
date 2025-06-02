@@ -9,7 +9,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 # ✅ Setup
-DOWNLOAD_DIR = "downloads"
+DOWNLOAD_DIR = "hindalco_downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 PDF_LOG_FILE = os.path.join(DOWNLOAD_DIR, "latest_hindalco_pdf.txt")
 
