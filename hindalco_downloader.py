@@ -21,7 +21,7 @@ options.add_argument("--disable-gpu")
 options.add_argument("--no-sandbox")
 
 driver = webdriver.Edge(options=options)
-driver.get("https://www.hindalco.com/our-businesses/aluminium-overview/primary-aluminium/primary-metal-price")
+driver.get("https://www.hindalco.com/businesses/aluminium/primary-aluminium/primary-metal-price")
 time.sleep(5)
 
 def get_latest_pdf_link():
