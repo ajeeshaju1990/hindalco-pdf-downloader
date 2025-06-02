@@ -20,14 +20,13 @@ jobs:
 
       - name: 📥 Install dependencies
         run: |
-          pip install selenium
-          pip install requests
+          pip install selenium requests
 
       - name: ▶️ Run Hindalco downloader
         run: python hindalco_downloader.py
 
       - name: 📤 Upload downloaded PDF
-        uses: actions/upload-artifact@v3.1.3  # ✅ Fully qualified version
+        uses: actions/upload-artifact@v3
         with:
           name: hindalco-pdf
           path: hindalco_downloads/*.pdf
