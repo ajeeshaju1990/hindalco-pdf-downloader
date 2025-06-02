@@ -1,37 +1,84 @@
-name: Download Hindalco PDF Daily
+import os
+import time
+import requests
+from datetime import datetime
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
-on:
-  schedule:
-    - cron: "30 2 * * *"  # Runs daily at 02:30 UTC (8:00 AM IST)
-  workflow_dispatch:      # Manual trigger
+# Setup download folder and log file
+DOWNLOAD_DIR = "hindalco_downloads"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+PDF_LOG_FILE = os.path.join(DOWNLOAD_DIR, "latest_hindalco_pdf.txt")
 
-jobs:
-  run-script:
-    runs-on: ubuntu-latest
+# Setup headless Chrome options
+options = Options()
+options.add_argument("--headless")
+options.add_argument("--disable-gpu")
+options.add_argument("--no-sandbox")
+options.add_argument("--window-size=1920,1080")
 
-    steps:
-      - name: 📦 Checkout code
-        uses: actions/checkout@v3
+driver = webdriver.Chrome(options=options)
+driver.get("https://www.hindalco.com/businesses/aluminium/primary-aluminium/primary-metal-price")
 
-      - name: 🐍 Set up Python 3.11
-        uses: actions/setup-python@v4
-        with:
-          python-version: 3.11
+# Wait for page to load PDFs links (up to 10 seconds)
+time.sleep(3)
 
-      - name: 📥 Install dependencies
-        run: |
-          pip install selenium requests
+def get_latest_pdf_link():
+    try:
+        # Find all PDF links containing "primary-ready-reckoner-"
+        pdf_elements = WebDriverWait(driver, 10).until(
+            EC.presence_of_all_elements_located(
+                (By.XPATH, "//a[contains(@href, '.pdf') and contains(@href, 'primary-ready-reckoner-')]")
+            )
+        )
 
-      - name: 🔧 Setup ChromeDriver
-        uses: nanasess/setup-chromedriver@v1
-        with:
-          chromedriver-version: latest
+        if not pdf_elements:
+            print("❌ No matching PDF links found.")
+            return None
 
-      - name: ▶️ Run Hindalco PDF downloader
-        run: python hindalco_downloader.py
+        # Optionally: sort PDFs by date extracted from filename (advanced)
+        # For now, just take the first link found
+        latest_pdf_url = pdf_elements[0].get_attribute("href")
+        print(f"✅ Found latest PDF: {latest_pdf_url}")
+        return latest_pdf_url
 
-      - name: 📤 Upload downloaded PDFs as artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: hindalco-pdf
-          path: hindalco_downloads/*.pdf
+    except Exception as e:
+        print(f"❌ Error fetching PDF links: {e}")
+        return None
+
+def is_new_pdf(pdf_url):
+    if os.path.exists(PDF_LOG_FILE):
+        with open(PDF_LOG_FILE, "r") as f:
+            last_pdf_url = f.read().strip()
+        if pdf_url == last_pdf_url:
+            print("✅ PDF already downloaded. Skipping...")
+            return False
+    return True
+
+def download_pdf(pdf_url, download_path):
+    filename = os.path.join(download_path, pdf_url.split("/")[-1])
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/pdf",
+        "Referer": "https://www.hindalco.com/"
+    }
+    response = requests.get(pdf_url, headers=headers, stream=True)
+    if response.status_code == 200:
+        with open(filename, "wb") as f:
+            f.write(response.content)
+        print(f"✅ PDF downloaded: {filename}")
+        with open(PDF_LOG_FILE, "w") as f:
+            f.write(pdf_url)
+    else:
+        print(f"❌ Failed to download PDF. Status Code: {response.status_code}")
+
+# Main execution
+try:
+    pdf_url = get_latest_pdf_link()
+    if pdf_url and is_new_pdf(pdf_url):
+        download_pdf(pdf_url, DOWNLOAD_DIR)
+finally:
+    driver.quit()
