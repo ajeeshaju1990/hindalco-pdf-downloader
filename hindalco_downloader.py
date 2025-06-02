@@ -25,19 +25,24 @@ driver.get("https://www.hindalco.com/businesses/aluminium/primary-aluminium/prim
 time.sleep(5)
 
 def get_latest_pdf_link():
-    today = datetime.today()
-    for day in range(15, 0, -20):
-        date_str = f"{day:02d}.{today.month:02d}.{today.year}"
-        try:
-            pdf_element = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.XPATH, f"//a[contains(text(), '{date_str}')]"))
-            )
-            pdf_link = pdf_element.get_attribute("href")
-            print(f"✅ Found latest PDF: {pdf_link}")
-            return pdf_link
-        except:
-            print(f"❌ No PDF found for {date_str}, checking previous day...")
-    return None
+    try:
+        # Find all PDF links on the page
+        pdf_elements = WebDriverWait(driver, 10).until(
+            EC.presence_of_all_elements_located((By.XPATH, "//a[contains(@href, '.pdf')]"))
+        )
+        
+        if not pdf_elements:
+            print("❌ No PDF links found on the page.")
+            return None
+
+        # Pick the first PDF link (assuming it's the latest)
+        latest_pdf = pdf_elements[0].get_attribute("href")
+        print(f"✅ Found latest PDF: {latest_pdf}")
+        return latest_pdf
+
+    except Exception as e:
+        print(f"❌ Error occurred while fetching PDF links: {e}")
+        return None
 
 def is_new_pdf(pdf_url):
     if os.path.exists(PDF_LOG_FILE):
