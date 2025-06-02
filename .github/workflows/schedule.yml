@@ -1,33 +1,27 @@
-name: Daily Hindalco PDF Downloader
+name: Download Hindalco PDF Daily
 
 on:
   schedule:
-    - cron: '0 6 * * *'  # Runs daily at 6 AM UTC (11:30 AM IST)
-  workflow_dispatch:  # Allow manual run
+    - cron: "30 2 * * *"  # ⏰ Runs daily at 02:30 UTC (8:00 AM IST)
+  workflow_dispatch:      # 🟢 Allows manual trigger
 
 jobs:
-  download_pdf:
+  run-script:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: 📦 Checkout code
         uses: actions/checkout@v3
 
-      - name: Set up Python
+      - name: 🐍 Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
+          python-version: 3.10
 
-      - name: Install dependencies
+      - name: 📥 Install dependencies
         run: |
-          pip install selenium requests
-          sudo apt-get update
-          sudo apt-get install -y wget unzip
-          # Install Edge + WebDriver
-          wget https://msedgedriver.azureedge.net/121.0.2277.128/edgedriver_linux64.zip
-          unzip edgedriver_linux64.zip
-          sudo mv msedgedriver /usr/local/bin/
-          sudo chmod +x /usr/local/bin/msedgedriver
+          pip install selenium
+          pip install requests
 
-      - name: Run script
+      - name: ▶️ Run Hindalco downloader
         run: python hindalco_downloader.py
