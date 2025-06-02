@@ -1,37 +1,33 @@
-name: Download Hindalco PDF Daily
+name: Hindalco PDF Downloader
 
 on:
+  workflow_dispatch:
   schedule:
-    - cron: "30 2 * * *"  # ⏰ Runs daily at 02:30 UTC (8:00 AM IST)
-  workflow_dispatch:      # 🟢 Allows manual trigger
+    - cron: '0 5 * * *'  # Runs daily at 5:00 UTC
 
 jobs:
-  run-script:
+  download:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📦 Checkout code
+      - name: Checkout repo
         uses: actions/checkout@v3
 
-      - name: 🐍 Set up Python
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: 3.11
+          python-version: '3.11'
 
-      - name: 🧩 Install dependencies
+      - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install selenium requests
-          sudo apt-get update
-          sudo apt-get install -y chromium-browser
 
-      - name: ▶️ Run Hindalco PDF downloader
+      - name: Run Hindalco PDF downloader
         run: python hindalco_downloader.py
 
-      - name: 📂 Verify download directory
-        run: ls -la hindalco_downloads/
-
-      - name: 📤 Upload downloaded PDF
+      - name: Upload PDF artifact
         uses: actions/upload-artifact@v3
         with:
           name: hindalco-pdf
-          path: hindalco_downloads/*.pdf
+          path: downloads/*.pdf
