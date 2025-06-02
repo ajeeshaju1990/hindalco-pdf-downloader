@@ -3,7 +3,7 @@ name: Download Hindalco PDF Daily
 on:
   schedule:
     - cron: "30 2 * * *"  # ⏰ Runs daily at 02:30 UTC (8:00 AM IST)
-  workflow_dispatch:      # 🟢 Allows manual trigger
+  workflow_dispatch:      # 🟢 Allows manual trigger from GitHub UI
 
 jobs:
   run-script:
@@ -27,7 +27,7 @@ jobs:
         run: python hindalco_downloader.py
 
       - name: 📤 Upload downloaded PDF
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v2   # ✅ Stable version
         with:
           name: hindalco-pdf
-          path: hindalco_downloads/*.pdf
+          path: hindalco_downloads/*.pdf   # ✅ Ensure this matches your script's download folder
