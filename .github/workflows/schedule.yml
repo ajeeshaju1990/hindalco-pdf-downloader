@@ -2,8 +2,8 @@ name: Download Hindalco PDF Daily
 
 on:
   schedule:
-    - cron: "30 2 * * *"  # Runs daily at 8:00 AM IST
-  workflow_dispatch:
+    - cron: "30 2 * * *"  # ⏰ Runs daily at 02:30 UTC (8:00 AM IST)
+  workflow_dispatch:      # 🟢 Allows manual trigger
 
 jobs:
   run-script:
@@ -13,27 +13,24 @@ jobs:
       - name: 📦 Checkout code
         uses: actions/checkout@v3
 
-      - name: 🐍 Set up Python 3.11
+      - name: 🐍 Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: 3.11
 
-      - name: 📥 Install dependencies
+      - name: 🧩 Install dependencies
         run: |
           pip install selenium requests
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser
 
       - name: ▶️ Run Hindalco PDF downloader
-        run: |
-          echo "Running hindalco_downloader.py..."
-          python hindalco_downloader.py
+        run: python hindalco_downloader.py
 
-      - name: 📂 List contents of output folder
-        run: |
-          echo "Checking hindalco_downloads/ contents..."
-          ls -la hindalco_downloads/
+      - name: 📂 Verify download directory
+        run: ls -la hindalco_downloads/
 
       - name: 📤 Upload downloaded PDF
-        if: success() && steps.run-script.outputs.files_found != '0'
         uses: actions/upload-artifact@v3
         with:
           name: hindalco-pdf
