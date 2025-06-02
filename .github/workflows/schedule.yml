@@ -33,6 +33,7 @@ jobs:
           ls -la hindalco_downloads/
 
       - name: 📤 Upload downloaded PDF
+        if: success() && steps.run-script.outputs.files_found != '0'
         uses: actions/upload-artifact@v3
         with:
           name: hindalco-pdf
