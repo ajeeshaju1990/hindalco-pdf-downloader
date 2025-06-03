@@ -1,14 +1,12 @@
-name: Download Hindalco PDF Daily
+name: Hindalco PDF Downloader
 
 on:
+  workflow_dispatch:  # Allow manual runs
   schedule:
-    # Every day at 6:30 AM IST (i.e., 1:00 AM UTC)
-    - cron: "30 1 * * *"
-  workflow_dispatch:
+    - cron: '30 3 * * *'  # Runs daily at 3:30 AM UTC (9:00 AM IST)
 
 jobs:
   download-pdf:
-    name: Download and Commit PDF
     runs-on: ubuntu-latest
 
     steps:
@@ -18,30 +16,26 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: "3.11"
+        python-version: '3.11'
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install selenium requests
+        pip install requests beautifulsoup4 selenium
 
-    - name: Set up Chrome for headless Selenium
-      uses: browser-actions/setup-chrome@latest
+    - name: Set up Chrome and Chromedriver
+      uses: browser-actions/setup-chrome@v1
+    - run: |
+        google-chrome --version
+        which google-chrome
 
-    - name: Run the Python script
-      run: python hindalco_downloader.py
+    - name: Run Hindalco PDF Downloader
+      run: |
+        mkdir -p downloads
+        python hindalco_downloader.py
 
-    - name: Get current time for commit message
-      uses: josStorer/get-current-time@v2.0.2
-      id: current-time
+    - name: Upload Downloaded PDF
+      uses: actions/upload-artifact@v4
       with:
-        format: "dddd, MMMM Do YYYY, h:mm:ss a"
-        utcOffset: "+05:30"
-
-    - name: Commit downloaded PDF
-      uses: stefanzweifel/git-auto-commit-action@v4
-      with:
-        commit_message: "Auto Commit: Hindalco PDF on ${{ steps.current-time.outputs.formattedTime }}"
-        commit_user_name: github-actions
-        commit_user_email: actions@github.com
-        file_pattern: "*.pdf"
+        name: Hindalco_PDF
+        path: downloads/*.pdf
