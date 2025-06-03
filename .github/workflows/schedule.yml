@@ -1,41 +1,47 @@
-name: Hindalco PDF Downloader
+name: Download Hindalco PDF Daily
 
 on:
   schedule:
-    - cron: '0 5 * * *'  # Runs every day at 5:00 AM UTC (10:30 AM IST)
+    # Every day at 6:30 AM IST (i.e., 1:00 AM UTC)
+    - cron: "30 1 * * *"
   workflow_dispatch:
 
 jobs:
-  run-script:
-    name: Run Hindalco Downloader
+  download-pdf:
+    name: Download and Commit PDF
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.11"
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install selenium requests
 
-      - name: Run script
-        run: python hindalco_downloader.py
+    - name: Set up Chrome for headless Selenium
+      uses: browser-actions/setup-chrome@latest
 
-      - name: Get current time
-        uses: josStorer/get-current-time@v2.0.2
-        id: current-time
-        with:
-          format: "dddd, MMMM Do YYYY, h:mm:ss a"
-          utcOffset: "+05:30"
+    - name: Run the Python script
+      run: python hindalco_downloader.py
 
-      - name: Commit and push PDF
-        uses: stefanzweifel/git-auto-commit-action@v4
-        with:
-          commit_message: "Auto Commit: Hindalco PDF at ${{ steps.current-time.outputs.formattedTime }}"
-          file_pattern: hindalco_downloads/*.pdf
+    - name: Get current time for commit message
+      uses: josStorer/get-current-time@v2.0.2
+      id: current-time
+      with:
+        format: "dddd, MMMM Do YYYY, h:mm:ss a"
+        utcOffset: "+05:30"
+
+    - name: Commit downloaded PDF
+      uses: stefanzweifel/git-auto-commit-action@v4
+      with:
+        commit_message: "Auto Commit: Hindalco PDF on ${{ steps.current-time.outputs.formattedTime }}"
+        commit_user_name: github-actions
+        commit_user_email: actions@github.com
+        file_pattern: "*.pdf"
