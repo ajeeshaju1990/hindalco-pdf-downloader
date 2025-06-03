@@ -1,74 +1,63 @@
 import os
 import time
+import datetime
 import requests
-from datetime import datetime
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+from bs4 import BeautifulSoup
 
-# ✅ Setup
-DOWNLOAD_DIR = "downloads"
+# Constants
+BASE_URL = "https://www.hindalco.com/"
+TARGET_URL = "https://www.hindalco.com/businesses/aluminium/aluminium-prices"
+DOWNLOAD_DIR = "hindalco_downloads"
+
+# Ensure folder exists
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-PDF_LOG_FILE = os.path.join(DOWNLOAD_DIR, "latest_hindalco_pdf.txt")
 
-# ✅ Setup Chrome WebDriver in headless mode (for GitHub Actions)
-options = Options()
-options.add_argument("--headless")
-options.add_argument("--disable-gpu")
-options.add_argument("--no-sandbox")
-options.add_argument("--window-size=1920,1080")
+# Start from 15th of the month and go backward
+today = datetime.date.today()
+year = today.year
+month = today.month
 
-driver = webdriver.Chrome(options=options)
-driver.get("https://www.hindalco.com/businesses/aluminium/primary-aluminium/primary-metal-price")
-time.sleep(5)
+start_day = 15
 
-def get_latest_pdf_link():
+def fetch_pdf_url():
+    print(f"🔍 Checking for Hindalco PDF from {start_day:02d} {month:02d} {year}")
+    for day in range(start_day, 0, -1):
+        date_str = f"{day:02d}-{month:02d}-{year}"
+        print(f"❌ No PDF found for {date_str}, checking previous day...")
+
+        try:
+            response = requests.get(TARGET_URL, timeout=15)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+
+            links = soup.find_all("a", href=True)
+            for link in links:
+                href = link["href"]
+                if href.lower().endswith(".pdf") and f"{day:02d}-{month:02d}-{year}" in href:
+                    return BASE_URL + href.lstrip("/"), date_str
+        except Exception as e:
+            print(f"Error accessing site: {e}")
+            time.sleep(2)
+    return None, None
+
+def download_pdf(pdf_url, date_str):
+    file_name = f"Hindalco_Aluminium_Price_{date_str}.pdf"
+    file_path = os.path.join(DOWNLOAD_DIR, file_name)
+    print(f"✅ PDF found! Downloading to {file_path}")
+    
     try:
-        # Find all PDF links containing "primary-ready-reckoner-"
-        pdf_elements = WebDriverWait(driver, 10).until(
-            EC.presence_of_all_elements_located((By.XPATH, "//a[contains(@href, '.pdf') and contains(@href, 'primary-ready-reckoner-')]"))
-        )
-        if not pdf_elements:
-            print("❌ No matching PDF links found.")
-            return None
-        latest_pdf_url = pdf_elements[0].get_attribute("href")
-        print(f"✅ Found latest PDF: {latest_pdf_url}")
-        return latest_pdf_url
+        with requests.get(pdf_url, stream=True, timeout=20) as r:
+            r.raise_for_status()
+            with open(file_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        print(f"✅ Download complete: {file_path}")
     except Exception as e:
-        print(f"❌ Error occurred while fetching PDF links: {e}")
-        return None
+        print(f"❌ Download failed: {e}")
 
-def is_new_pdf(pdf_url):
-    if os.path.exists(PDF_LOG_FILE):
-        with open(PDF_LOG_FILE, "r") as f:
-            last_pdf_url = f.read().strip()
-        if pdf_url == last_pdf_url:
-            print("✅ PDF already downloaded. Skipping...")
-            return False
-    return True
-
-def download_pdf(pdf_url, download_path):
-    filename = os.path.join(download_path, pdf_url.split("/")[-1])
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/pdf",
-        "Referer": "https://www.hindalco.com/"
-    }
-    response = requests.get(pdf_url, headers=headers, stream=True)
-    if response.status_code == 200:
-        with open(filename, "wb") as f:
-            f.write(response.content)
-        print(f"✅ PDF downloaded: {filename}")
-        with open(PDF_LOG_FILE, "w") as f:
-            f.write(pdf_url)
-    else:
-        print(f"❌ Failed to download PDF. Status Code: {response.status_code}")
-
-# ✅ Main execution
-pdf_url = get_latest_pdf_link()
-if pdf_url and is_new_pdf(pdf_url):
-    download_pdf(pdf_url, DOWNLOAD_DIR)
-
-driver.quit()
+# Main Execution
+pdf_url, date_found = fetch_pdf_url()
+if pdf_url:
+    download_pdf(pdf_url, date_found)
+else:
+    print("❌ No Hindalco Aluminium Price PDF found in the date range.")
