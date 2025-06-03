@@ -1,27 +1,41 @@
-name: Download Hindalco PDF Daily
+name: Hindalco PDF Downloader
 
 on:
   schedule:
-    - cron: "30 2 * * *"  # ⏰ Runs daily at 02:30 UTC (8:00 AM IST)
-  workflow_dispatch:      # 🟢 Allows manual trigger
+    - cron: '0 5 * * *'  # Runs every day at 5:00 AM UTC (10:30 AM IST)
+  workflow_dispatch:
 
 jobs:
   run-script:
+    name: Run Hindalco Downloader
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📦 Checkout code
-        uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: 🐍 Set up Python
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: 3.11
+          python-version: "3.11"
 
-      - name: 📥 Install dependencies
+      - name: Install dependencies
         run: |
-          pip install selenium
-          pip install requests
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: ▶️ Run Hindalco downloader
+      - name: Run script
         run: python hindalco_downloader.py
+
+      - name: Get current time
+        uses: josStorer/get-current-time@v2.0.2
+        id: current-time
+        with:
+          format: "dddd, MMMM Do YYYY, h:mm:ss a"
+          utcOffset: "+05:30"
+
+      - name: Commit and push PDF
+        uses: stefanzweifel/git-auto-commit-action@v4
+        with:
+          commit_message: "Auto Commit: Hindalco PDF at ${{ steps.current-time.outputs.formattedTime }}"
+          file_pattern: hindalco_downloads/*.pdf
