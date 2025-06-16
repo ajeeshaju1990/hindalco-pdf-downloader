@@ -15,17 +15,20 @@ This repository automatically downloads the latest Hindalco Aluminium Price PDFs
 
 ### Step 2: Add Files to Your Repository
 1. In your new repository, click "Add file" → "Create new file"
-2. Create these files one by one:
+2. Create the folder structure `.github/workflows/` first
+3. Create these files one by one:
 
-#### File 1: `hindalco_pdf_downloader.py`
+#### File 1: `.github/workflows/hindalco_downloader.py`
 Copy the Python script from the first artifact above.
 
-#### File 2: `.github/workflows/hindalco_daily.yml`
-- Create the folder structure: `.github/workflows/`
-- Copy the YAML workflow from the second artifact above.
+#### File 2: `.github/workflows/schedule.yml`
+Copy the YAML workflow from the second artifact above.
 
-#### File 3: `requirements.txt`
+#### File 3: `.github/workflows/requirements.txt`
 Copy the requirements from the third artifact above.
+
+#### File 4: `.github/workflows/README.md`
+Copy this README content to the workflows folder as well.
 
 ### Step 3: Enable GitHub Actions
 1. Go to your repository
@@ -48,12 +51,13 @@ Copy the requirements from the third artifact above.
 your-repo/
 ├── .github/
 │   └── workflows/
-│       └── hindalco_daily.yml
+│       ├── schedule.yml
+│       ├── hindalco_downloader.py
+│       ├── requirements.txt
+│       └── README.md
 ├── hindalco_pdfs/
 │   └── (downloaded PDFs will appear here)
-├── hindalco_pdf_downloader.py
 ├── latest_hindalco_pdf.json
-├── requirements.txt
 └── README.md
 ```
 
