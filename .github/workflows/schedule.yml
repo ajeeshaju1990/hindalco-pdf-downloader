@@ -24,7 +24,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install selenium requests
+        pip install -r .github/workflows/requirements.txt
         
     - name: Install Chrome
       uses: browser-actions/setup-chrome@v1
@@ -33,7 +33,7 @@ jobs:
       uses: nanasess/setup-chromedriver@v2
       
     - name: Run Hindalco PDF downloader
-      run: python hindalco_pdf_downloader.py
+      run: python .github/workflows/hindalco_downloader.py
       
     - name: Commit and push changes
       run: |
