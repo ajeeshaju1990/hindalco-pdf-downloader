@@ -1,41 +1,46 @@
-name: Hindalco PDF Downloader
+name: Daily Hindalco PDF Download
 
 on:
-  workflow_dispatch:  # Allow manual runs
   schedule:
-    - cron: '30 3 * * *'  # Runs daily at 3:30 AM UTC (9:00 AM IST)
+    # Run every day at 9:00 AM IST (3:30 AM UTC)
+    - cron: '30 3 * * *'
+  
+  # Allow manual trigger
+  workflow_dispatch:
 
 jobs:
   download-pdf:
     runs-on: ubuntu-latest
-
+    
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v3
-
+      uses: actions/checkout@v4
+      
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.11'
-
+        python-version: '3.9'
+        
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install requests beautifulsoup4 selenium
-
-    - name: Set up Chrome and Chromedriver
+        pip install selenium requests
+        
+    - name: Install Chrome
       uses: browser-actions/setup-chrome@v1
-    - run: |
-        google-chrome --version
-        which google-chrome
-
-    - name: Run Hindalco PDF Downloader
+      
+    - name: Install ChromeDriver
+      uses: nanasess/setup-chromedriver@v2
+      
+    - name: Run Hindalco PDF downloader
+      run: python hindalco_pdf_downloader.py
+      
+    - name: Commit and push changes
       run: |
-        mkdir -p downloads
-        python hindalco_downloader.py
-
-    - name: Upload Downloaded PDF
-      uses: actions/upload-artifact@v4
-      with:
-        name: Hindalco_PDF
-        path: downloads/*.pdf
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add .
+        git diff --staged --quiet || git commit -m "Daily Hindalco PDF download - $(date +'%Y-%m-%d %H:%M:%S')"
+        git push
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
