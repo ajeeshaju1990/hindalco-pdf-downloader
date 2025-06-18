@@ -2,10 +2,15 @@ name: Daily Hindalco PDF Download
 
 on:
   schedule:
-    # Run every day at 9:00 AM IST (3:30 AM UTC)
-    - cron: '30 3 * * *'
-  
-  # Allow manual trigger
+    - cron: '30 0 * * *'  # 6:00 AM IST
+    - cron: '30 3 * * *'  # 9:00 AM IST
+    - cron: '30 6 * * *'  # 12:00 PM IST
+    - cron: '30 9 * * *'  # 3:00 PM IST
+    - cron: '30 12 * * *' # 6:00 PM IST
+    - cron: '30 15 * * *' # 9:00 PM IST
+    - cron: '30 18 * * *' # 12:00 AM IST (next day)
+    - cron: '30 21 * * *' # 3:00 AM IST (next day)
+
   workflow_dispatch:
 
 permissions:
@@ -14,30 +19,30 @@ permissions:
 jobs:
   download-pdf:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-      
+
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.9'
-        
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r .github/workflows/requirements.txt
-        
+
     - name: Install Chrome
       uses: browser-actions/setup-chrome@v1
-      
+
     - name: Install ChromeDriver
       uses: nanasess/setup-chromedriver@v2
-      
+
     - name: Run Hindalco PDF downloader
       run: python .github/workflows/hindalco_downloader.py
-      
+
     - name: Commit and push changes
       run: |
         git config --local user.email "action@github.com"
@@ -48,6 +53,5 @@ jobs:
         else
           git commit -m "Daily Hindalco PDF download - $(date +'%Y-%m-%d %H:%M:%S')"
           git push
-        fi
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
