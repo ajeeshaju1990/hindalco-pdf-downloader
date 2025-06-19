@@ -42,5 +42,6 @@ jobs:
         else
           git commit -m "Daily Hindalco PDF download - $(date +'%Y-%m-%d %H:%M:%S')"
           git push
+        fi
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
