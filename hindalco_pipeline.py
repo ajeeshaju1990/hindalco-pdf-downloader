@@ -166,12 +166,28 @@ def load_processed_set() -> set[str]:
 def save_processed_set(s: set[str]):
     PROCESSED_SET_FILE.write_text("\n".join(sorted(s)), encoding="utf-8")
 
-def sort_df(df: pd.DataFrame) -> pd.DataFrame:
+# ---------- CLEANUP / ORDERING ----------
+def clean_and_renumber(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove duplicates and renumber Sl.no. based on Circular Date ascending (oldest=1)."""
+    # Normalize date for comparisons
     dtd = pd.to_datetime(df["Circular Date"], dayfirst=True, errors="coerce")
-    df = df.assign(_d=dtd).sort_values(by=["_d", "Sl.no."], ascending=[False, True], kind="stable").drop(columns=["_d"])
+    df = df.assign(_date=dtd)
+
+    # Drop duplicates on (Circular Date, Grade) — keep last added
+    df = df.drop_duplicates(subset=["Circular Date", "Grade"], keep="last")
+
+    # Renumber Sl.no. by ascending date
+    df = df.sort_values(by=["_date", "Sl.no."], ascending=[True, True], kind="stable").reset_index(drop=True)
+    df["Sl.no."] = range(1, len(df) + 1)
+
+    # For display, show newest first but keep Sl.no. from ascending assignment
+    df = df.sort_values(by=["_date", "Sl.no."], ascending=[False, True], kind="stable")
+
+    # Final typing/formatting
     df["Basic Price"] = pd.to_numeric(df["Basic Price"], errors="coerce").round(3)
     df["Circular Date"] = pd.to_datetime(df["Circular Date"], dayfirst=True, errors="coerce").dt.strftime("%d.%m.%Y")
-    return df
+
+    return df.drop(columns=["_date"])
 
 def save_excel_formatted(df: pd.DataFrame, path: pathlib.Path):
     df.to_excel(path, index=False)
@@ -202,37 +218,38 @@ def save_excel_formatted(df: pd.DataFrame, path: pathlib.Path):
     ws.freeze_panes = "A2"
     wb.save(path)
 
-def append_row_to_excel(desc: str, price_thousands: float, date_str: str, link: str) -> int:
-    grade = "P1020"  # per your instruction
+def write_df(df: pd.DataFrame):
+    df = clean_and_renumber(df)
+    save_excel_formatted(df, EXCEL_FILE)
+
+def append_row_to_excel(desc: str, price_thousands: float, date_str: str, link: str):
+    grade = "P1020"  # fixed grade as per your rule
     if EXCEL_FILE.exists():
         df = pd.read_excel(EXCEL_FILE, dtype={"Sl.no.": "Int64"})
-        for c in COLUMNS:
-            if c not in df.columns:
-                df[c] = pd.NA
-        df = df[COLUMNS]
-        next_slno = int(df["Sl.no."].max()) + 1 if df["Sl.no."].notna().any() else 1
     else:
         df = pd.DataFrame(columns=COLUMNS)
-        next_slno = 1
 
+    # Ensure columns
+    for c in COLUMNS:
+        if c not in df.columns:
+            df[c] = pd.NA
+    df = df[COLUMNS]
+
+    # Add the new row (dup cleanup will happen in write_df)
     new_row = {
-        "Sl.no.": next_slno,
+        "Sl.no.": pd.NA,
         "Description": desc,
         "Grade": grade,
         "Basic Price": price_thousands,
         "Circular Date": date_str,
         "Circular Link": link or "",
     }
-
     df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-    df = sort_df(df)
-    save_excel_formatted(df, EXCEL_FILE)
-    return next_slno
-
+    write_df(df)
 
 # ---------------- MODES ----------------
 def run_normal():
-    """Daily mode: fetch latest URL, download if new, append once."""
+    """Daily mode: fetch latest URL, download if new, append once (with cleanup)."""
     html = get_html(START_URL)
     pdf_url = find_latest_pdf_url(html)
     if not pdf_url:
@@ -261,26 +278,35 @@ def run_normal():
         raise RuntimeError(f"Could not parse numeric price: {raw_price!r}")
 
     date_str = parse_date_from_filename(pdf_path.name)
-    slno = append_row_to_excel(desc, price, date_str, pdf_url)
+    append_row_to_excel(desc, price, date_str, pdf_url)
 
     # mark processed
     LAST_PROCESSED_FILE.write_text(pdf_path.name, encoding="utf-8")
     processed = load_processed_set(); processed.add(pdf_path.name); save_processed_set(processed)
 
-    print(f"Excel updated: {EXCEL_FILE} (added Sl.no. {slno})")
+    print(f"Excel updated: {EXCEL_FILE}")
 
 def run_backfill():
-    """Backfill mode: process ALL PDFs already in hindalco_pdfs/ (oldest→newest), skipping ones already processed."""
+    """Backfill mode: process ALL PDFs already in hindalco_pdfs/ (oldest→newest), with cleanup & renumbering."""
     pdfs = sorted(PDF_DIR.glob("*.pdf"), key=lambda p: p.stat().st_mtime)  # oldest first
     if not pdfs:
         print("No PDFs to backfill in hindalco_pdfs/.")
         return
 
     processed = load_processed_set()
+    # Load existing DF once
+    if EXCEL_FILE.exists():
+        df = pd.read_excel(EXCEL_FILE, dtype={"Sl.no.": "Int64"})
+    else:
+        df = pd.DataFrame(columns=COLUMNS)
+    for c in COLUMNS:
+        if c not in df.columns:
+            df[c] = pd.NA
+    df = df[COLUMNS]
+
     added = 0
     for pdf_path in pdfs:
         if pdf_path.name in processed:
-            print(f"Skipping already processed: {pdf_path.name}")
             continue
         try:
             desc, raw_price = extract_target_row(pdf_path)
@@ -289,28 +315,50 @@ def run_backfill():
                 print(f"Could not parse price in {pdf_path.name}; skipping.")
                 continue
             date_str = parse_date_from_filename(pdf_path.name)
-            # link unknown for historical files → leave blank
-            append_row_to_excel(desc, price, date_str, link="")
+            new_row = {
+                "Sl.no.": pd.NA,
+                "Description": desc,
+                "Grade": "P1020",
+                "Basic Price": price,
+                "Circular Date": date_str,
+                "Circular Link": "",   # unknown for historic files
+            }
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
             processed.add(pdf_path.name)
-            print(f"Processed: {pdf_path.name}")
             added += 1
         except Exception as e:
             print(f"Error processing {pdf_path.name}: {e}")
 
     save_processed_set(processed)
     if added == 0:
-        print("Backfill complete. No new rows added (everything was already processed).")
+        print("Backfill complete. No new rows to add.")
     else:
-        print(f"Backfill complete. Added {added} row(s).")
+        write_df(df)
+        print(f"Backfill complete. Added {added} row(s). Cleaned duplicates and renumbered.")
 
+def run_repair():
+    """Repair/cleanup only: de-duplicate current Excel and renumber Sl.no. by date ascending."""
+    if not EXCEL_FILE.exists():
+        print("No Excel file to repair yet.")
+        return
+    df = pd.read_excel(EXCEL_FILE, dtype={"Sl.no.": "Int64"})
+    for c in COLUMNS:
+        if c not in df.columns:
+            df[c] = pd.NA
+    df = df[COLUMNS]
+    write_df(df)
+    print("Repair complete: duplicates removed and Sl.no. renumbered by Circular Date (oldest=1).")
 
 # ---------------- ENTRYPOINT ----------------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--backfill", default="false", help="true/false (process all existing PDFs once)")
+    ap.add_argument("--repair", default="false", help="true/false (cleanup Excel: dedupe + renumber)")
     args = ap.parse_args()
 
-    if str(args.backfill).strip().lower() in ("true", "1", "yes", "y"):
+    if str(args.repair).strip().lower() in ("true", "1", "yes", "y"):
+        run_repair()
+    elif str(args.backfill).strip().lower() in ("true", "1", "yes", "y"):
         run_backfill()
     else:
         run_normal()
