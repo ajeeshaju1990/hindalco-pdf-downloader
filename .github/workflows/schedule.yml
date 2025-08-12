@@ -16,7 +16,7 @@ permissions:
   contents: write
 
 jobs:
-  download-and-extract:
+  run:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
@@ -24,11 +24,6 @@ jobs:
         with:
           persist-credentials: true
 
-      # --- Your existing downloader (kept as-is) ---
-      - name: Run Hindalco downloader
-        run: python .github/workflows/hindalco_downloader.py
-
-      # --- New: install deps for extractor ---
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -39,11 +34,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # --- New: extract the target row from the newest PDF into Excel ---
-      - name: Extract row to Excel
-        run: python hindalco_extractor.py
+      - name: Download + Extract + Update Excel
+        run: |
+          python hindalco_pipeline.py
 
-      # --- Commit any changes (new PDF, updated Excel, logs) ---
       - name: Commit and push changes
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
@@ -52,7 +46,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Hindalco: update PDFs/Excel ($(date -u +'%Y-%m-%d %H:%M:%S UTC'))"
+            git commit -m "Hindalco: update PDFs & Excel ($(date -u +'%Y-%m-%d %H:%M:%S UTC'))"
             git push
           fi
         env:
