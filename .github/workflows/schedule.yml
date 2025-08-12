@@ -1,0 +1,26 @@
+on:
+  schedule:
+    - cron: '30 0 * * *'
+    - cron: '30 3 * * *'
+    - cron: '30 6 * * *'
+    - cron: '30 9 * * *'
+    - cron: '30 12 * * *'
+    - cron: '30 15 * * *'
+    - cron: '30 18 * * *'
+    - cron: '30 21 * * *'
+  workflow_dispatch:
+    inputs:
+      backfill:
+        description: "Process ALL existing PDFs once"
+        required: false
+        default: "false"
+      repair:
+        description: "Cleanup Excel (dedupe + renumber Sl.no. by date asc)"
+        required: false
+        default: "false"
+
+# ...
+
+- name: Download + Extract + Update Excel
+  run: |
+    python hindalco_pipeline.py --backfill "${{ github.event.inputs.backfill }}" --repair "${{ github.event.inputs.repair }}"
