@@ -18,8 +18,8 @@ PDF_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 LATEST_JSON           = pathlib.Path("latest_hindalco_pdf.json")      # stores last_pdf_url, filename, timestamp
-LAST_PROCESSED_FILE   = DATA_DIR / "last_hindalco_processed.txt"      # single guard for latest mode
-PROCESSED_SET_FILE    = DATA_DIR / "processed_files.txt"              # set of filenames processed (for backfill + normal)
+LAST_PROCESSED_FILE   = DATA_DIR / "last_hindalco_processed.txt"      # guard for latest mode
+PROCESSED_SET_FILE    = DATA_DIR / "processed_files.txt"              # set of filenames processed (backfill + normal)
 EXCEL_FILE            = DATA_DIR / "hindalco_prices.xlsx"
 
 COLUMNS = ["Sl.no.", "Description", "Grade", "Basic Price", "Circular Date", "Circular Link"]
@@ -113,23 +113,18 @@ def parse_date_from_filename(filename: str) -> str:
 
 def divide_thousands(x: str | float | int) -> float | None:
     s = str(x).replace(",", "").strip()
-    if not s:
-        return None
-    try:
-        return round(float(s)/1000.0, 3)
-    except ValueError:
-        return None
+    if not s: return None
+    try: return round(float(s)/1000.0, 3)
+    except ValueError: return None
 
 def extract_target_row(pdf_path: pathlib.Path) -> tuple[str, str]:
     """Return (description, raw_price) for the row containing P0610 + P1020 + 'EC Grade'."""
     must_have = ["P0610", "P1020", "EC GRADE"]
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            # Tables first
-            try:
-                tables = page.extract_tables()
-            except Exception:
-                tables = []
+            # tables
+            try: tables = page.extract_tables()
+            except Exception: tables = []
             for tbl in tables or []:
                 for row in tbl:
                     cells = [(c or "").strip() for c in row]
@@ -142,7 +137,7 @@ def extract_target_row(pdf_path: pathlib.Path) -> tuple[str, str]:
                                 break
                         desc = " ".join(cells[:-1]).strip()
                         return desc, price
-            # Fallback: line scan
+            # text lines
             words = page.extract_words(use_text_flow=True, keep_blank_chars=False)
             lines = {}
             for w in words:
@@ -169,21 +164,20 @@ def save_processed_set(s: set[str]):
 # ---------- CLEANUP / ORDERING ----------
 def clean_and_renumber(df: pd.DataFrame) -> pd.DataFrame:
     """Remove duplicates and renumber Sl.no. based on Circular Date ascending (oldest=1)."""
-    # Normalize date for comparisons
     dtd = pd.to_datetime(df["Circular Date"], dayfirst=True, errors="coerce")
     df = df.assign(_date=dtd)
 
-    # Drop duplicates on (Circular Date, Grade) — keep last added
+    # dedupe by (date, grade) — grade is always P1020
     df = df.drop_duplicates(subset=["Circular Date", "Grade"], keep="last")
 
-    # Renumber Sl.no. by ascending date
+    # renumber by ascending date
     df = df.sort_values(by=["_date", "Sl.no."], ascending=[True, True], kind="stable").reset_index(drop=True)
     df["Sl.no."] = range(1, len(df) + 1)
 
-    # For display, show newest first but keep Sl.no. from ascending assignment
+    # display newest first
     df = df.sort_values(by=["_date", "Sl.no."], ascending=[False, True], kind="stable")
 
-    # Final typing/formatting
+    # finalize types/format
     df["Basic Price"] = pd.to_numeric(df["Basic Price"], errors="coerce").round(3)
     df["Circular Date"] = pd.to_datetime(df["Circular Date"], dayfirst=True, errors="coerce").dt.strftime("%d.%m.%Y")
 
@@ -223,54 +217,46 @@ def write_df(df: pd.DataFrame):
     save_excel_formatted(df, EXCEL_FILE)
 
 def append_row_to_excel(desc: str, price_thousands: float, date_str: str, link: str):
-    grade = "P1020"  # fixed grade as per your rule
+    grade = "P1020"  # fixed rule
     if EXCEL_FILE.exists():
         df = pd.read_excel(EXCEL_FILE, dtype={"Sl.no.": "Int64"})
     else:
         df = pd.DataFrame(columns=COLUMNS)
 
-    # Ensure columns
     for c in COLUMNS:
         if c not in df.columns:
             df[c] = pd.NA
     df = df[COLUMNS]
 
-    # Add the new row (dup cleanup will happen in write_df)
-    new_row = {
+    df = pd.concat([df, pd.DataFrame([{
         "Sl.no.": pd.NA,
         "Description": desc,
         "Grade": grade,
         "Basic Price": price_thousands,
         "Circular Date": date_str,
         "Circular Link": link or "",
-    }
-    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+    }])], ignore_index=True)
+
     write_df(df)
 
 # ---------------- MODES ----------------
 def run_normal():
-    """Daily mode: fetch latest URL, download if new, append once (with cleanup)."""
     html = get_html(START_URL)
     pdf_url = find_latest_pdf_url(html)
     if not pdf_url:
-        print("No PDF link found on Hindalco page. Exiting.")
-        return
+        print("No PDF link found on Hindalco page. Exiting."); return
 
     latest = read_latest_json()
-    last_url = latest.get("last_pdf_url")
-    if last_url == pdf_url:
-        print("No new PDF (same URL). Skipping download & Excel update.")
-        return
+    if latest.get("last_pdf_url") == pdf_url:
+        print("No new PDF (same URL). Skipping download & Excel update."); return
 
     pdf_path = download_pdf(pdf_url)
     write_latest_json(pdf_url, str(pdf_path))
     print(f"Downloaded: {pdf_path.name}")
 
-    # avoid re-processing the same file
     last_name = LAST_PROCESSED_FILE.read_text(encoding="utf-8").strip() if LAST_PROCESSED_FILE.exists() else ""
     if pdf_path.name == last_name:
-        print("Latest PDF already processed. Skipping Excel update.")
-        return
+        print("Latest PDF already processed. Skipping Excel update."); return
 
     desc, raw_price = extract_target_row(pdf_path)
     price = divide_thousands(raw_price)
@@ -280,21 +266,16 @@ def run_normal():
     date_str = parse_date_from_filename(pdf_path.name)
     append_row_to_excel(desc, price, date_str, pdf_url)
 
-    # mark processed
     LAST_PROCESSED_FILE.write_text(pdf_path.name, encoding="utf-8")
     processed = load_processed_set(); processed.add(pdf_path.name); save_processed_set(processed)
-
     print(f"Excel updated: {EXCEL_FILE}")
 
 def run_backfill():
-    """Backfill mode: process ALL PDFs already in hindalco_pdfs/ (oldest→newest), with cleanup & renumbering."""
-    pdfs = sorted(PDF_DIR.glob("*.pdf"), key=lambda p: p.stat().st_mtime)  # oldest first
+    pdfs = sorted(PDF_DIR.glob("*.pdf"), key=lambda p: p.stat().st_mtime)  # oldest→newest
     if not pdfs:
-        print("No PDFs to backfill in hindalco_pdfs/.")
-        return
+        print("No PDFs to backfill in hindalco_pdfs/."); return
 
     processed = load_processed_set()
-    # Load existing DF once
     if EXCEL_FILE.exists():
         df = pd.read_excel(EXCEL_FILE, dtype={"Sl.no.": "Int64"})
     else:
@@ -306,24 +287,22 @@ def run_backfill():
 
     added = 0
     for pdf_path in pdfs:
-        if pdf_path.name in processed:
+        if pdf_path.name in processed:  # already imported
             continue
         try:
             desc, raw_price = extract_target_row(pdf_path)
             price = divide_thousands(raw_price)
             if price is None:
-                print(f"Could not parse price in {pdf_path.name}; skipping.")
-                continue
+                print(f"Could not parse price in {pdf_path.name}; skipping."); continue
             date_str = parse_date_from_filename(pdf_path.name)
-            new_row = {
+            df = pd.concat([df, pd.DataFrame([{
                 "Sl.no.": pd.NA,
                 "Description": desc,
                 "Grade": "P1020",
                 "Basic Price": price,
                 "Circular Date": date_str,
-                "Circular Link": "",   # unknown for historic files
-            }
-            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                "Circular Link": "",   # unknown for historical
+            }])], ignore_index=True)
             processed.add(pdf_path.name)
             added += 1
         except Exception as e:
@@ -337,23 +316,21 @@ def run_backfill():
         print(f"Backfill complete. Added {added} row(s). Cleaned duplicates and renumbered.")
 
 def run_repair():
-    """Repair/cleanup only: de-duplicate current Excel and renumber Sl.no. by date ascending."""
     if not EXCEL_FILE.exists():
-        print("No Excel file to repair yet.")
-        return
+        print("No Excel file to repair yet."); return
     df = pd.read_excel(EXCEL_FILE, dtype={"Sl.no.": "Int64"})
     for c in COLUMNS:
         if c not in df.columns:
             df[c] = pd.NA
     df = df[COLUMNS]
     write_df(df)
-    print("Repair complete: duplicates removed and Sl.no. renumbered by Circular Date (oldest=1).")
+    print("Repair complete: duplicates removed and Sl.no. renumbered by date asc.")
 
 # ---------------- ENTRYPOINT ----------------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--backfill", default="false", help="true/false (process all existing PDFs once)")
-    ap.add_argument("--repair", default="false", help="true/false (cleanup Excel: dedupe + renumber)")
+    ap.add_argument("--repair",   default="false", help="true/false (cleanup Excel: dedupe + renumber)")
     args = ap.parse_args()
 
     if str(args.repair).strip().lower() in ("true", "1", "yes", "y"):
