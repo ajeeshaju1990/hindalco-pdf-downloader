@@ -11,6 +11,11 @@ on:
     - cron: '30 18 * * *'  # 00:00 IST (next day)
     - cron: '30 21 * * *'  # 03:00 IST (next day)
   workflow_dispatch:
+    inputs:
+      backfill:
+        description: "Process ALL existing PDFs once"
+        required: false
+        default: "false"
 
 permissions:
   contents: write
@@ -36,7 +41,7 @@ jobs:
 
       - name: Download + Extract + Update Excel
         run: |
-          python hindalco_pipeline.py
+          python hindalco_pipeline.py --backfill "${{ github.event.inputs.backfill }}"
 
       - name: Commit and push changes
         run: |
