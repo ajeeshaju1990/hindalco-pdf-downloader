@@ -1,4 +1,4 @@
-import os, re, json, pathlib, datetime, time
+import os, re, json, pathlib, datetime, argparse
 import requests
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
@@ -17,16 +17,17 @@ DATA_DIR = pathlib.Path("data")
 PDF_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-LATEST_JSON          = pathlib.Path("latest_hindalco_pdf.json")      # single source of truth
-LAST_PROCESSED_FILE  = DATA_DIR / "last_hindalco_processed.txt"      # guard against duplicates
-EXCEL_FILE           = DATA_DIR / "hindalco_prices.xlsx"
+LATEST_JSON           = pathlib.Path("latest_hindalco_pdf.json")      # stores last_pdf_url, filename, timestamp
+LAST_PROCESSED_FILE   = DATA_DIR / "last_hindalco_processed.txt"      # single guard for latest mode
+PROCESSED_SET_FILE    = DATA_DIR / "processed_files.txt"              # set of filenames processed (for backfill + normal)
+EXCEL_FILE            = DATA_DIR / "hindalco_prices.xlsx"
 
 COLUMNS = ["Sl.no.", "Description", "Grade", "Basic Price", "Circular Date", "Circular Link"]
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
-# match pieces like ...-08-august-2025.pdf  OR ...-8-august-2025.pdf
+# e.g. ...-08-august-2025.pdf  OR ...-8-august-2025.pdf
 FILENAME_DATE_RE = re.compile(r"(\d{1,2})[-_ ]([A-Za-z]+)[-_ ](\d{4})", re.IGNORECASE)
 
 
@@ -45,13 +46,11 @@ def find_latest_pdf_url(html: str) -> str | None:
         if href.lower().endswith(".pdf"):
             abs_url = urljoin(START_URL, href)
             text = (a.get_text(" ", strip=True) or "").lower()
-            # Prefer primary price PDFs
             score = 0
             if "ready" in text or "reckoner" in text or "price" in text:
                 score += 2
             if any(m in href.lower() for m in ["ready", "reckoner", "price"]):
                 score += 2
-            # use position as tie-breaker
             candidates.append((score, abs_url))
     if not candidates:
         return None
@@ -122,9 +121,7 @@ def divide_thousands(x: str | float | int) -> float | None:
         return None
 
 def extract_target_row(pdf_path: pathlib.Path) -> tuple[str, str]:
-    """
-    Return (description, raw_price) for the row containing P0610 + P1020 + 'EC Grade'.
-    """
+    """Return (description, raw_price) for the row containing P0610 + P1020 + 'EC Grade'."""
     must_have = ["P0610", "P1020", "EC GRADE"]
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
@@ -159,7 +156,15 @@ def extract_target_row(pdf_path: pathlib.Path) -> tuple[str, str]:
                     price = m.group(1) if m else ""
                     desc = text_line.strip()
                     return desc, price
-    raise RuntimeError("Could not find target row (needs P0610 / P1020 / EC Grade).")
+    raise RuntimeError(f"Could not find target row in: {pdf_path.name}")
+
+def load_processed_set() -> set[str]:
+    if PROCESSED_SET_FILE.exists():
+        return set(x.strip() for x in PROCESSED_SET_FILE.read_text(encoding="utf-8").splitlines() if x.strip())
+    return set()
+
+def save_processed_set(s: set[str]):
+    PROCESSED_SET_FILE.write_text("\n".join(sorted(s)), encoding="utf-8")
 
 def sort_df(df: pd.DataFrame) -> pd.DataFrame:
     dtd = pd.to_datetime(df["Circular Date"], dayfirst=True, errors="coerce")
@@ -197,46 +202,8 @@ def save_excel_formatted(df: pd.DataFrame, path: pathlib.Path):
     ws.freeze_panes = "A2"
     wb.save(path)
 
-
-# ---------------- MAIN ----------------
-def main():
-    # 1) Find latest PDF URL from site
-    html = get_html(START_URL)
-    pdf_url = find_latest_pdf_url(html)
-    if not pdf_url:
-        print("No PDF link found on Hindalco page. Exiting.")
-        return
-
-    # 2) Dedup by last_pdf_url
-    latest = read_latest_json()
-    last_url = latest.get("last_pdf_url")
-    if last_url == pdf_url:
-        print("No new PDF (same URL). Skipping download & Excel update.")
-        return
-
-    # 3) Download
-    pdf_path = download_pdf(pdf_url)
-    write_latest_json(pdf_url, str(pdf_path))
-    print(f"Downloaded: {pdf_path.name}")
-
-    # 4) Avoid double-processing by filename guard
-    last_name = LAST_PROCESSED_FILE.read_text(encoding="utf-8").strip() if LAST_PROCESSED_FILE.exists() else ""
-    if pdf_path.name == last_name:
-        print("Latest PDF already processed. Skipping Excel update.")
-        return
-
-    # 5) Extract row
-    desc, raw_price = extract_target_row(pdf_path)
-    price = divide_thousands(raw_price)
-    if price is None:
-        raise RuntimeError(f"Could not parse numeric price: {raw_price!r}")
-
-    # 6) Build record
-    circ_date = parse_date_from_filename(pdf_path.name)
-    grade = "P1020"                         # per your instruction
-    link = pdf_url
-
-    # 7) Append to Excel
+def append_row_to_excel(desc: str, price_thousands: float, date_str: str, link: str) -> int:
+    grade = "P1020"  # per your instruction
     if EXCEL_FILE.exists():
         df = pd.read_excel(EXCEL_FILE, dtype={"Sl.no.": "Int64"})
         for c in COLUMNS:
@@ -252,17 +219,101 @@ def main():
         "Sl.no.": next_slno,
         "Description": desc,
         "Grade": grade,
-        "Basic Price": price,
-        "Circular Date": circ_date,
-        "Circular Link": link,
+        "Basic Price": price_thousands,
+        "Circular Date": date_str,
+        "Circular Link": link or "",
     }
 
     df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
     df = sort_df(df)
     save_excel_formatted(df, EXCEL_FILE)
+    return next_slno
 
+
+# ---------------- MODES ----------------
+def run_normal():
+    """Daily mode: fetch latest URL, download if new, append once."""
+    html = get_html(START_URL)
+    pdf_url = find_latest_pdf_url(html)
+    if not pdf_url:
+        print("No PDF link found on Hindalco page. Exiting.")
+        return
+
+    latest = read_latest_json()
+    last_url = latest.get("last_pdf_url")
+    if last_url == pdf_url:
+        print("No new PDF (same URL). Skipping download & Excel update.")
+        return
+
+    pdf_path = download_pdf(pdf_url)
+    write_latest_json(pdf_url, str(pdf_path))
+    print(f"Downloaded: {pdf_path.name}")
+
+    # avoid re-processing the same file
+    last_name = LAST_PROCESSED_FILE.read_text(encoding="utf-8").strip() if LAST_PROCESSED_FILE.exists() else ""
+    if pdf_path.name == last_name:
+        print("Latest PDF already processed. Skipping Excel update.")
+        return
+
+    desc, raw_price = extract_target_row(pdf_path)
+    price = divide_thousands(raw_price)
+    if price is None:
+        raise RuntimeError(f"Could not parse numeric price: {raw_price!r}")
+
+    date_str = parse_date_from_filename(pdf_path.name)
+    slno = append_row_to_excel(desc, price, date_str, pdf_url)
+
+    # mark processed
     LAST_PROCESSED_FILE.write_text(pdf_path.name, encoding="utf-8")
-    print(f"Excel updated: {EXCEL_FILE} (added Sl.no. {next_slno})")
+    processed = load_processed_set(); processed.add(pdf_path.name); save_processed_set(processed)
+
+    print(f"Excel updated: {EXCEL_FILE} (added Sl.no. {slno})")
+
+def run_backfill():
+    """Backfill mode: process ALL PDFs already in hindalco_pdfs/ (oldest→newest), skipping ones already processed."""
+    pdfs = sorted(PDF_DIR.glob("*.pdf"), key=lambda p: p.stat().st_mtime)  # oldest first
+    if not pdfs:
+        print("No PDFs to backfill in hindalco_pdfs/.")
+        return
+
+    processed = load_processed_set()
+    added = 0
+    for pdf_path in pdfs:
+        if pdf_path.name in processed:
+            print(f"Skipping already processed: {pdf_path.name}")
+            continue
+        try:
+            desc, raw_price = extract_target_row(pdf_path)
+            price = divide_thousands(raw_price)
+            if price is None:
+                print(f"Could not parse price in {pdf_path.name}; skipping.")
+                continue
+            date_str = parse_date_from_filename(pdf_path.name)
+            # link unknown for historical files → leave blank
+            append_row_to_excel(desc, price, date_str, link="")
+            processed.add(pdf_path.name)
+            print(f"Processed: {pdf_path.name}")
+            added += 1
+        except Exception as e:
+            print(f"Error processing {pdf_path.name}: {e}")
+
+    save_processed_set(processed)
+    if added == 0:
+        print("Backfill complete. No new rows added (everything was already processed).")
+    else:
+        print(f"Backfill complete. Added {added} row(s).")
+
+
+# ---------------- ENTRYPOINT ----------------
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--backfill", default="false", help="true/false (process all existing PDFs once)")
+    args = ap.parse_args()
+
+    if str(args.backfill).strip().lower() in ("true", "1", "yes", "y"):
+        run_backfill()
+    else:
+        run_normal()
 
 if __name__ == "__main__":
     main()
