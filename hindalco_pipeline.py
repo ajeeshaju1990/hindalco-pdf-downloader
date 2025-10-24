@@ -466,3 +466,12 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+    # ==============================
+    # CHANGES: Always refresh 'Daily' from current Excel, even if no new PDF
+    # ==============================
+    try:
+        if EXCEL_FILE.exists():
+            write_two_sheets_circulars_and_daily(str(EXCEL_FILE))
+    except Exception as e:
+        print(f"⚠️ Daily refresh skipped: {e}")
