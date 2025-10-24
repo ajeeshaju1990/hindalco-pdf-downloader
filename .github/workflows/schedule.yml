@@ -20,10 +20,6 @@ on:
         description: "Cleanup Excel (dedupe + renumber Sl.no. by date asc)"
         required: false
         default: "false"
-      daily_export:
-        description: "Create data/daily.xlsx (from current circulars)"
-        required: false
-        default: "false"
 
 permissions:
   contents: write
@@ -32,13 +28,11 @@ jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           persist-credentials: true
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -47,36 +41,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Hindalco pipeline
+      - name: Download + Extract + Update Excel
         run: |
-          echo "Running pipeline with inputs:"
-          echo "backfill=${{ github.event.inputs.backfill }}"
-          echo "repair=${{ github.event.inputs.repair }}"
-          echo "daily_export=${{ github.event.inputs.daily_export }}"
-          python hindalco_pipeline.py \
-            --backfill "${{ github.event.inputs.backfill }}" \
-            --repair "${{ github.event.inputs.repair }}" \
-            --daily_export "${{ github.event.inputs.daily_export }}"
-
-      # Upload generated Excel files and metadata as artifacts
-      - name: Upload data folder
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: data-output
-          path: |
-            data/*.xlsx
-            data/*.txt
-            data/*.json
-          if-no-files-found: warn
-
-      - name: Upload PDFs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: hindalco-pdfs
-          path: hindalco_pdfs/*.pdf
-          if-no-files-found: warn
+          python hindalco_pipeline.py --backfill "${{ github.event.inputs.backfill }}" --repair "${{ github.event.inputs.repair }}"
 
       - name: Commit and push changes
         run: |
