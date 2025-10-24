@@ -212,9 +212,133 @@ def save_excel_formatted(df: pd.DataFrame, path: pathlib.Path):
     ws.freeze_panes = "A2"
     wb.save(path)
 
+# ==============================
+# CHANGES: Daily expansion helpers (forward-fill gap days → 'Daily' sheet)
+# ==============================
+from datetime import datetime as _dt, timedelta as _td
+
+EXCEL_PATH = str(EXCEL_FILE)  # reuse the same file path
+
+def _parse_circ_date(s: str) -> pd.Timestamp:
+    """Parse 'Circular Date' like 18.10.2025 or 18-10-2025 (day-first) to Timestamp."""
+    if pd.isna(s):
+        return pd.NaT
+    s = str(s).strip().replace(".", "-")
+    return pd.to_datetime(s, dayfirst=True, errors="coerce")
+
+def _ensure_min_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Ensure required columns exist in the circulars table (do NOT rename 'Sl.no.').
+    """
+    required = ["Description", "Grade", "Basic Price", "Circular Date", "Circular Link"]
+    out = df.copy()
+    for col in required:
+        if col not in out.columns:
+            out[col] = pd.NA
+    return out
+
+def _build_daily_from_circulars(df_circ: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build a daily table by filling every calendar day between circulars with the last
+    known circular's price/date/link.
+
+    Boundary rule:
+    - Only forward-fill up to **yesterday (IST)**.
+    - Only fill beyond the latest circular date if **latest_circ_date < yesterday**.
+    """
+    circ = df_circ.copy()
+    circ["Circular Date"] = circ["Circular Date"].apply(_parse_circ_date)
+    circ = circ.dropna(subset=["Circular Date"]).sort_values("Circular Date").reset_index(drop=True)
+
+    if circ.empty:
+        return pd.DataFrame(columns=["Date","Description","Grade","Basic Price","Circular Date","Circular Link"])
+
+    # Compute "yesterday" in IST without extra deps (UTC+5:30)
+    utc_now = _dt.utcnow()
+    now_ist = utc_now + _td(hours=5, minutes=30)
+    yesterday = (now_ist.date() - _td(days=1))
+
+    latest_circ_date = circ["Circular Date"].max().date()
+    expand_until = yesterday if latest_circ_date < yesterday else latest_circ_date
+
+    records = []
+    for i in range(len(circ)):
+        row = circ.iloc[i]
+        start = row["Circular Date"].date()
+        if i < len(circ) - 1:
+            next_start = circ.iloc[i + 1]["Circular Date"].date()
+            end = min(expand_until, next_start - _td(days=1))
+        else:
+            end = expand_until
+
+        if end < start:
+            continue
+
+        day = start
+        while day <= end:
+            records.append({
+                "Date": _dt.strptime(day.strftime("%d-%m-%Y"), "%d-%m-%Y").strftime("%d-%m-%Y"),  # dd-mm-YYYY
+                "Description": row.get("Description", pd.NA),
+                "Grade": row.get("Grade", pd.NA),
+                "Basic Price": row.get("Basic Price", pd.NA),
+                "Circular Date": row["Circular Date"].strftime("%d.%m.%Y"),  # keep dot format
+                "Circular Link": row.get("Circular Link", pd.NA),
+            })
+            day += _td(days=1)
+
+    daily = pd.DataFrame.from_records(
+        records,
+        columns=["Date","Description","Grade","Basic Price","Circular Date","Circular Link"]
+    )
+
+    if not daily.empty:
+        daily = daily.sort_values(
+            by=pd.to_datetime(daily["Date"], dayfirst=True),
+            ascending=False
+        ).reset_index(drop=True)
+        daily["Basic Price"] = pd.to_numeric(daily["Basic Price"], errors="coerce")
+
+    return daily
+
+def write_two_sheets_circulars_and_daily(excel_path: str = EXCEL_PATH) -> None:
+    """
+    Append/replace ONLY the 'Daily' sheet so we don't lose formatting on your original sheet.
+    We read circular rows from the FIRST sheet (whatever its name is).
+    """
+    try:
+        df_in = pd.read_excel(excel_path, engine="openpyxl", sheet_name=0)
+    except FileNotFoundError:
+        print(f"⚠️ {excel_path} not found; skipping Daily build.")
+        return
+
+    df_circ = _ensure_min_columns(df_in)
+    df_daily = _build_daily_from_circulars(df_circ)
+
+    # Append/replace ONLY the 'Daily' sheet, keep other sheets as-is (and formatted)
+    try:
+        with pd.ExcelWriter(
+            excel_path, engine="openpyxl", mode="a", if_sheet_exists="replace"
+        ) as writer:
+            df_daily.to_excel(writer, index=False, sheet_name="Daily")
+        print(f"✅ Updated 'Daily' sheet in {excel_path}.")
+    except ValueError:
+        # When file has no workbook yet, fallback to full write (very first run)
+        with pd.ExcelWriter(excel_path, engine="openpyxl", mode="w") as writer:
+            df_in.to_excel(writer, index=False, sheet_name="Circulars")
+            df_daily.to_excel(writer, index=False, sheet_name="Daily")
+        print(f"✅ Created 'Circulars' + 'Daily' in {excel_path}.")
+
+# ---------- WRITE/APPEND PIPELINE ----------
 def write_df(df: pd.DataFrame):
     df = clean_and_renumber(df)
     save_excel_formatted(df, EXCEL_FILE)
+    # ==============================
+    # CHANGES: Build/refresh the 'Daily' sheet every time we update the Excel
+    # ==============================
+    try:
+        write_two_sheets_circulars_and_daily(EXCEL_PATH)
+    except Exception as e:
+        print(f"⚠️ Failed to update 'Daily' sheet: {e}")
 
 def append_row_to_excel(desc: str, price_thousands: float, date_str: str, link: str):
     grade = "P1020"  # fixed rule
