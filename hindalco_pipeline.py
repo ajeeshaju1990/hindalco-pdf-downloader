@@ -20,7 +20,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 LATEST_JSON           = pathlib.Path("latest_hindalco_pdf.json")      # stores last_pdf_url, filename, timestamp
 LAST_PROCESSED_FILE   = DATA_DIR / "last_hindalco_processed.txt"      # guard for latest mode
 PROCESSED_SET_FILE    = DATA_DIR / "processed_files.txt"              # set of filenames processed (backfill + normal)
-EXCEL_FILE            = DATA_DIR / "hindalco_prices.xlsx"
+EXCEL_FILE            = DATA_DIR / "hindalco_prices.xlsx"             # main workbook we persist
 
 COLUMNS = ["Sl.no.", "Description", "Grade", "Basic Price", "Circular Date", "Circular Link"]
 
@@ -213,7 +213,7 @@ def save_excel_formatted(df: pd.DataFrame, path: pathlib.Path):
     wb.save(path)
 
 # ==============================
-# DAILY EXPANSION HELPERS (new)
+# DAILY EXPANSION HELPERS
 # ==============================
 EXCEL_PATH = str(EXCEL_FILE)  # reuse the same file path
 
@@ -296,7 +296,7 @@ def _build_daily_from_circulars(df_circ: pd.DataFrame) -> pd.DataFrame:
 
     return daily
 
-def write_two_sheets_circulars_and_daily(excel_path: str = EXCEL_PATH) -> None:
+def _rebuild_daily_sheet_inplace(excel_path: str = EXCEL_PATH) -> None:
     """
     Rebuild the 'Daily' sheet inside the existing workbook using openpyxl only.
     Keeps your original first sheet (circulars) and its formatting intact.
@@ -359,15 +359,37 @@ def write_two_sheets_circulars_and_daily(excel_path: str = EXCEL_PATH) -> None:
     wb.save(excel_path)
     print(f"✅ Rebuilt 'Daily' sheet in {excel_path}.")
 
+def _export_daily_file(src_excel_path: str = str(EXCEL_FILE), out_path: str = str(DATA_DIR / "daily.xlsx")) -> None:
+    """
+    Always write a standalone file data/daily.xlsx from current circulars.
+    """
+    if not os.path.exists(src_excel_path):
+        print(f"⚠️ {src_excel_path} not found; cannot export Daily.")
+        return
+
+    df_in = pd.read_excel(src_excel_path, engine="openpyxl", sheet_name=0)
+    df_circ = _ensure_min_columns(df_in)
+    df_daily = _build_daily_from_circulars(df_circ)
+
+    with pd.ExcelWriter(out_path, engine="openpyxl", mode="w") as writer:
+        df_daily.to_excel(writer, index=False, sheet_name="Daily")
+
+    print(f"✅ Wrote {out_path} (Daily as standalone file).")
+
 # ---------- WRITE/APPEND PIPELINE ----------
 def write_df(df: pd.DataFrame):
     df = clean_and_renumber(df)
     save_excel_formatted(df, EXCEL_FILE)
     # Always (re)build the 'Daily' sheet after we write the circulars
     try:
-        write_two_sheets_circulars_and_daily(str(EXCEL_FILE))
+        _rebuild_daily_sheet_inplace(str(EXCEL_FILE))
     except Exception as e:
         print(f"⚠️ Failed to update 'Daily' sheet: {e}")
+    # Always (re)export a standalone data/daily.xlsx
+    try:
+        _export_daily_file(str(EXCEL_FILE), str(DATA_DIR / "daily.xlsx"))
+    except Exception as e:
+        print(f"⚠️ Failed to export data/daily.xlsx: {e}")
 
 def append_row_to_excel(desc: str, price_thousands: float, date_str: str, link: str):
     grade = "P1020"  # fixed rule
@@ -479,39 +501,12 @@ def run_repair():
     write_df(df)
     print("Repair complete: duplicates removed and Sl.no. renumbered by date asc.")
 
-# -------- One-time DAILY export (separate file) --------
-def export_daily_to_file(src_excel_path: str = str(EXCEL_FILE), out_path: str = str(DATA_DIR / "daily.xlsx")) -> None:
-    """
-    Read the FIRST sheet from hindalco_prices.xlsx (circulars),
-    build the Daily forward-filled table, and write to data/daily.xlsx.
-    """
-    if not os.path.exists(src_excel_path):
-        print(f"⚠️ {src_excel_path} not found; cannot export Daily.")
-        return
-
-    df_in = pd.read_excel(src_excel_path, engine="openpyxl", sheet_name=0)
-    df_circ = _ensure_min_columns(df_in)
-    df_daily = _build_daily_from_circulars(df_circ)
-
-    with pd.ExcelWriter(out_path, engine="openpyxl", mode="w") as writer:
-        df_daily.to_excel(writer, index=False, sheet_name="Daily")
-
-    print(f"✅ Wrote {out_path} (Daily sheet as standalone file).")
-
 # ---------------- ENTRYPOINT ----------------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--backfill", default="false", help="true/false (process all existing PDFs once)")
     ap.add_argument("--repair",   default="false", help="true/false (cleanup Excel: dedupe + renumber)")
-    ap.add_argument("--daily_export", default="false", help="true/false (write Daily to data/daily.xlsx)")
     args = ap.parse_args()
-
-    # One-time export branch (doesn't fetch/download anything)
-    if str(args.daily_export).strip().lower() in ("true", "1", "yes", "y"):
-        export_daily_to_file(str(EXCEL_FILE), str(DATA_DIR / "daily.xlsx"))
-        if EXCEL_FILE.exists():
-            write_two_sheets_circulars_and_daily(str(EXCEL_FILE))
-        return
 
     if str(args.repair).strip().lower() in ("true", "1", "yes", "y"):
         run_repair()
@@ -520,10 +515,11 @@ def main():
     else:
         run_normal()
 
-    # Always refresh 'Daily' from current Excel, even if no new PDF this run
+    # Always refresh/ensure Daily outputs even if nothing new was downloaded
     try:
         if EXCEL_FILE.exists():
-            write_two_sheets_circulars_and_daily(str(EXCEL_FILE))
+            _rebuild_daily_sheet_inplace(str(EXCEL_FILE))
+            _export_daily_file(str(EXCEL_FILE), str(DATA_DIR / "daily.xlsx"))
     except Exception as e:
         print(f"⚠️ Daily refresh skipped: {e}")
 
