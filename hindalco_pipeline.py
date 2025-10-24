@@ -18,11 +18,12 @@ PDF_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 LATEST_JSON           = pathlib.Path("latest_hindalco_pdf.json")      # stores last_pdf_url, filename, timestamp
-LAST_PROCESSED_FILE   = DATA_DIR / "last_hindalco_processed.txt"      # guard for latest mode
+LAST_PROCESSED_FILE   = DATA_DIR / "last_hindalco_processed.txt"      # guard for latest mode (filename)
 PROCESSED_SET_FILE    = DATA_DIR / "processed_files.txt"              # set of filenames processed (backfill + normal)
 EXCEL_FILE            = DATA_DIR / "hindalco_prices.xlsx"
 
-COLUMNS = ["Sl.no.", "Description", "Grade", "Basic Price", "Circular Date", "Circular Link"]
+# final DAILY columns
+DAILY_COLUMNS = ["Date", "Description", "Grade", "Basic Price", "Circular Date", "Circular Link"]
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
@@ -31,7 +32,7 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 FILENAME_DATE_RE = re.compile(r"(\d{1,2})[-_ ]([A-Za-z]+)[-_ ](\d{4})", re.IGNORECASE)
 
 
-# ---------------- UTILITIES ----------------
+# ---------------- HTML & DOWNLOAD ----------------
 def get_html(url: str) -> str:
     r = requests.get(url, headers={"User-Agent": UA}, timeout=60)
     r.raise_for_status()
@@ -94,6 +95,8 @@ def download_pdf(pdf_url: str) -> pathlib.Path:
                     f.write(chunk)
     return dest
 
+
+# ---------------- PDF PARSE & HELPERS ----------------
 def parse_date_from_filename(filename: str) -> str:
     m = FILENAME_DATE_RE.search(filename)
     if not m:
@@ -138,7 +141,7 @@ def extract_target_row(pdf_path: pathlib.Path) -> tuple[str, str]:
                         desc = " ".join(cells[:-1]).strip()
                         return desc, price
             # text lines
-            words = page.extract_words(use_text_flow=True, keep_blank_chars=False)
+            words = pdf.pages[0].extract_words(use_text_flow=True, keep_blank_chars=False) if pdf.pages else []
             lines = {}
             for w in words:
                 y = round(w["top"], 1)
@@ -153,36 +156,112 @@ def extract_target_row(pdf_path: pathlib.Path) -> tuple[str, str]:
                     return desc, price
     raise RuntimeError(f"Could not find target row in: {pdf_path.name}")
 
-def load_processed_set() -> set[str]:
-    if PROCESSED_SET_FILE.exists():
-        return set(x.strip() for x in PROCESSED_SET_FILE.read_text(encoding="utf-8").splitlines() if x.strip())
-    return set()
 
-def save_processed_set(s: set[str]):
-    PROCESSED_SET_FILE.write_text("\n".join(sorted(s)), encoding="utf-8")
+# ---------------- EVENTS ↔ DAILY ----------------
+def _to_dt(s: str) -> datetime.date | None:
+    try:
+        return datetime.datetime.strptime(s, "%d.%m.%Y").date()
+    except Exception:
+        return None
 
-# ---------- CLEANUP / ORDERING ----------
-def clean_and_renumber(df: pd.DataFrame) -> pd.DataFrame:
-    """Remove duplicates and renumber Sl.no. based on Circular Date ascending (oldest=1)."""
-    dtd = pd.to_datetime(df["Circular Date"], dayfirst=True, errors="coerce")
-    df = df.assign(_date=dtd)
+def _fmt_date_dash(d: datetime.date) -> str:
+    # "Date" column format: dd-mm-YYYY
+    return d.strftime("%d-%m-%Y")
 
-    # dedupe by (date, grade) — grade is always P1020
-    df = df.drop_duplicates(subset=["Circular Date", "Grade"], keep="last")
+def _fmt_date_dot(d: datetime.date) -> str:
+    # "Circular Date" format: dd.mm.YYYY
+    return d.strftime("%d.%m.%Y")
 
-    # renumber by ascending date
-    df = df.sort_values(by=["_date", "Sl.no."], ascending=[True, True], kind="stable").reset_index(drop=True)
-    df["Sl.no."] = range(1, len(df) + 1)
+def load_events_from_excel_if_any() -> list[dict]:
+    """Read existing Excel and extract unique circular-events.
+       Works with old 'Sl.no.' format or new 'Date' format."""
+    if not EXCEL_FILE.exists():
+        return []
 
-    # display newest first
-    df = df.sort_values(by=["_date", "Sl.no."], ascending=[False, True], kind="stable")
+    df = pd.read_excel(EXCEL_FILE)
+    cols = [c.strip() for c in df.columns]
 
-    # finalize types/format
-    df["Basic Price"] = pd.to_numeric(df["Basic Price"], errors="coerce").round(3)
-    df["Circular Date"] = pd.to_datetime(df["Circular Date"], dayfirst=True, errors="coerce").dt.strftime("%d.%m.%Y")
+    if "Sl.no." in cols:
+        # Old event sheet; each row is a circular-entry already
+        # Normalize columns and types
+        keep = ["Description", "Grade", "Basic Price", "Circular Date", "Circular Link"]
+        for k in keep:
+            if k not in df.columns: df[k] = pd.NA
+        ev = df[keep].copy()
+    else:
+        # Already daily; collapse to unique events per Circular Date (keep last link)
+        keep = ["Description", "Grade", "Basic Price", "Circular Date", "Circular Link"]
+        for k in keep:
+            if k not in df.columns: df[k] = pd.NA
+        ev = df[keep].copy()
+        # keep last per Circular Date
+        ev = ev.sort_values(by="Circular Date").drop_duplicates(subset=["Circular Date"], keep="last")
 
-    return df.drop(columns=["_date"])
+    # Coerce types
+    ev["Basic Price"] = pd.to_numeric(ev["Basic Price"], errors="coerce")
+    ev["Circular Date DT"] = ev["Circular Date"].apply(_to_dt)
+    ev = ev.dropna(subset=["Circular Date DT"]).sort_values("Circular Date DT")
 
+    events = []
+    for _, r in ev.iterrows():
+        events.append({
+            "desc": r.get("Description", ""),
+            "grade": r.get("Grade", "P1020") or "P1020",
+            "price": float(r.get("Basic Price")) if pd.notna(r.get("Basic Price")) else None,
+            "cdate": r["Circular Date DT"],
+            "clink": r.get("Circular Link", "") or "",
+        })
+    return events
+
+def add_event(events: list[dict], desc: str, grade: str, price: float, circular_date_str: str, link: str):
+    """Merge a new event; keep the newest info for a given Circular Date."""
+    cdt = _to_dt(circular_date_str)
+    if not cdt: return
+    # remove any existing same cdate, then append
+    events = [e for e in events if e["cdate"] != cdt]
+    events.append({"desc": desc, "grade": grade or "P1020", "price": price, "cdate": cdt, "clink": link or ""})
+    events.sort(key=lambda e: e["cdate"])
+    return events
+
+def build_daily_from_events(events: list[dict], end_date: datetime.date | None = None) -> pd.DataFrame:
+    """Create daily rows from first event date through end_date (default today),
+       forward-filling Description/Grade/Price/Circular Date/Link from the latest circular <= that day."""
+    if not events:
+        return pd.DataFrame(columns=DAILY_COLUMNS)
+
+    events = sorted(events, key=lambda e: e["cdate"])
+    start = events[0]["cdate"]
+    today = end_date or datetime.date.today()
+    if start > today:
+        start = today
+
+    # walk over days
+    rows = []
+    idx = 0
+    current = events[0]
+    for d in (start + datetime.timedelta(n) for n in range((today - start).days + 1)):
+        # advance current event if we crossed to a newer one
+        while idx + 1 < len(events) and events[idx + 1]["cdate"] <= d:
+            idx += 1
+            current = events[idx]
+
+        rows.append({
+            "Date": _fmt_date_dash(d),                      # dd-mm-YYYY
+            "Description": current["desc"],
+            "Grade": current["grade"] or "P1020",
+            "Basic Price": round(float(current["price"]), 3) if current["price"] is not None else None,
+            "Circular Date": _fmt_date_dot(current["cdate"]),
+            "Circular Link": current["clink"],
+        })
+
+    # newest first for display
+    df = pd.DataFrame(rows)
+    df["DateDT"] = pd.to_datetime(df["Date"], format="%d-%m-%Y", errors="coerce")
+    df = df.sort_values(by="DateDT", ascending=False).drop(columns=["DateDT"])
+    return df[DAILY_COLUMNS]
+
+
+# ---------------- WRITE EXCEL (formating) ----------------
 def save_excel_formatted(df: pd.DataFrame, path: pathlib.Path):
     df.to_excel(path, index=False)
     wb = load_workbook(path)
@@ -194,323 +273,123 @@ def save_excel_formatted(df: pd.DataFrame, path: pathlib.Path):
         max_len = len(str(cname))
         for v in df[cname].astype(str).values:
             max_len = max(max_len, len(v))
-        ws.column_dimensions[get_column_letter(cidx)].width = max(10, min(max_len + 2, 80))
+        ws.column_dimensions[get_column_letter(cidx)].width = max(12, min(max_len + 2, 80))
 
+    # numeric/date formats
     header_row = 1
-    link_col_idx  = COLUMNS.index("Circular Link") + 1
-    price_col_idx = COLUMNS.index("Basic Price") + 1
-
+    price_col_idx = DAILY_COLUMNS.index("Basic Price") + 1
     for r in range(1, ws.max_row + 1):
         for c in range(1, ws.max_column + 1):
             cell = ws.cell(row=r, column=c)
             cell.alignment = center
-            if r > header_row and c == price_col_idx and cell.value is not None:
+            if r > header_row and c == price_col_idx:
                 cell.number_format = "0.000"
-            if r > header_row and c == link_col_idx and isinstance(cell.value, str) and str(cell.value).startswith("http"):
-                cell.hyperlink = cell.value
+            # hyperlinks
+            if r > header_row and ws.cell(row=r, column=DAILY_COLUMNS.index("Circular Link")+1).value:
+                val = ws.cell(row=r, column=DAILY_COLUMNS.index("Circular Link")+1).value
+                if isinstance(val, str) and val.startswith("http"):
+                    ws.cell(row=r, column=DAILY_COLUMNS.index("Circular Link")+1).hyperlink = val
 
     ws.freeze_panes = "A2"
     wb.save(path)
 
-# ==============================
-# DAILY EXPANSION HELPERS (new)
-# ==============================
-EXCEL_PATH = str(EXCEL_FILE)  # reuse the same file path
-
-def _parse_circ_date(s: str) -> pd.Timestamp:
-    """Parse 'Circular Date' like 18.10.2025 or 18-10-2025 (day-first) to Timestamp."""
-    if pd.isna(s):
-        return pd.NaT
-    s = str(s).strip().replace(".", "-")
-    return pd.to_datetime(s, dayfirst=True, errors="coerce")
-
-def _ensure_min_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Ensure required columns exist in the circulars table (do NOT rename 'Sl.no.')."""
-    required = ["Description", "Grade", "Basic Price", "Circular Date", "Circular Link"]
-    out = df.copy()
-    for col in required:
-        if col not in out.columns:
-            out[col] = pd.NA
-    return out
-
-def _build_daily_from_circulars(df_circ: pd.DataFrame) -> pd.DataFrame:
-    """
-    Build a daily table by filling every calendar day between circulars with the last
-    known circular's price/date/link.
-
-    Boundary rule:
-    - Only forward-fill up to **yesterday (IST)**.
-    - Only fill beyond the latest circular date if **latest_circ_date < yesterday**.
-    """
-    circ = df_circ.copy()
-    circ["Circular Date"] = circ["Circular Date"].apply(_parse_circ_date)
-    circ = circ.dropna(subset=["Circular Date"]).sort_values("Circular Date").reset_index(drop=True)
-
-    if circ.empty:
-        return pd.DataFrame(columns=["Date","Description","Grade","Basic Price","Circular Date","Circular Link"])
-
-    # Compute "yesterday" in IST without extra deps (UTC+5:30)
-    utc_now = datetime.datetime.utcnow()
-    now_ist = utc_now + datetime.timedelta(hours=5, minutes=30)
-    yesterday = (now_ist.date() - datetime.timedelta(days=1))
-
-    latest_circ_date = circ["Circular Date"].max().date()
-    expand_until = yesterday if latest_circ_date < yesterday else latest_circ_date
-
-    records = []
-    for i in range(len(circ)):
-        row = circ.iloc[i]
-        start = row["Circular Date"].date()
-        if i < len(circ) - 1:
-            next_start = circ.iloc[i + 1]["Circular Date"].date()
-            end = min(expand_until, next_start - datetime.timedelta(days=1))
-        else:
-            end = expand_until
-
-        if end < start:
-            continue
-
-        day = start
-        while day <= end:
-            records.append({
-                "Date": day.strftime("%d-%m-%Y"),                  # dd-mm-YYYY
-                "Description": row.get("Description", pd.NA),
-                "Grade": row.get("Grade", pd.NA),
-                "Basic Price": row.get("Basic Price", pd.NA),
-                "Circular Date": row["Circular Date"].strftime("%d.%m.%Y"),  # keep dot format
-                "Circular Link": row.get("Circular Link", pd.NA),
-            })
-            day += datetime.timedelta(days=1)
-
-    daily = pd.DataFrame.from_records(
-        records,
-        columns=["Date","Description","Grade","Basic Price","Circular Date","Circular Link"]
-    )
-
-    if not daily.empty:
-        daily = daily.sort_values(
-            by=pd.to_datetime(daily["Date"], dayfirst=True),
-            ascending=False
-        ).reset_index(drop=True)
-        daily["Basic Price"] = pd.to_numeric(daily["Basic Price"], errors="coerce")
-
-    return daily
-
-def write_daily_sheet_inplace(excel_path: str = EXCEL_PATH) -> None:
-    """
-    Rebuild the 'Daily' sheet inside the existing workbook using openpyxl only.
-    Keeps your original first sheet (circulars) and its formatting intact.
-    """
-    if not os.path.exists(excel_path):
-        print(f"⚠️ {excel_path} not found; skipping Daily build.")
-        return
-
-    # Read circulars from the FIRST sheet (whatever its name)
-    df_in = pd.read_excel(excel_path, engine="openpyxl", sheet_name=0)
-    df_circ = _ensure_min_columns(df_in)
-    df_daily = _build_daily_from_circulars(df_circ)
-
-    wb = load_workbook(excel_path)
-    # Remove existing 'Daily' sheet if present
-    if 'Daily' in wb.sheetnames:
-        ws_old = wb['Daily']
-        wb.remove(ws_old)
-
-    # Create fresh 'Daily' sheet
-    ws = wb.create_sheet('Daily')
-    headers = ["Date","Description","Grade","Basic Price","Circular Date","Circular Link"]
-    ws.append(headers)
-
-    # Write rows
-    for _, row in df_daily.iterrows():
-        ws.append([
-            row.get("Date", ""),
-            row.get("Description", ""),
-            row.get("Grade", ""),
-            None if pd.isna(row.get("Basic Price")) else float(row.get("Basic Price")),
-            row.get("Circular Date", ""),
-            row.get("Circular Link", ""),
-        ])
-
-    # Basic formatting: center align, price number format, hyperlinks, widths, freeze header
-    center = Alignment(horizontal="center", vertical="center")
-    price_col_idx = headers.index("Basic Price") + 1
-    link_col_idx  = headers.index("Circular Link") + 1
-
-    # Auto width
-    for cidx, cname in enumerate(headers, start=1):
-        max_len = len(str(cname))
-        for r in range(2, ws.max_row + 1):
-            v = ws.cell(row=r, column=cidx).value
-            max_len = max(max_len, len(str(v)) if v is not None else 0)
-        ws.column_dimensions[get_column_letter(cidx)].width = max(10, min(max_len + 2, 80))
-
-    # Align + formats
-    for r in range(1, ws.max_row + 1):
-        for c in range(1, ws.max_column + 1):
-            cell = ws.cell(row=r, column=c)
-            cell.alignment = center
-            if r > 1 and c == price_col_idx and (cell.value is not None):
-                cell.number_format = "0.000"
-            if r > 1 and c == link_col_idx and isinstance(cell.value, str) and str(cell.value).startswith("http"):
-                cell.hyperlink = cell.value
-
-    ws.freeze_panes = "A2"
-    wb.save(excel_path)
-    print(f"✅ Rebuilt 'Daily' sheet in {excel_path}.")
-
-def export_daily_to_file(src_excel_path: str = str(EXCEL_FILE), out_path: str = str(DATA_DIR / "daily.xlsx")) -> None:
-    """
-    Read the FIRST sheet from hindalco_prices.xlsx (circulars),
-    build the Daily forward-filled table, and write to data/daily.xlsx.
-    """
-    if not os.path.exists(src_excel_path):
-        print(f"⚠️ {src_excel_path} not found; cannot export Daily.")
-        return
-
-    df_in = pd.read_excel(src_excel_path, engine="openpyxl", sheet_name=0)
-    df_circ = _ensure_min_columns(df_in)
-    df_daily = _build_daily_from_circulars(df_circ)
-
-    with pd.ExcelWriter(out_path, engine="openpyxl", mode="w") as writer:
-        df_daily.to_excel(writer, index=False, sheet_name="Daily")
-
-    print(f"✅ Wrote {out_path} (Daily sheet as standalone file).")
-
-# ---------- WRITE/APPEND PIPELINE ----------
-def write_df(df: pd.DataFrame):
-    df = clean_and_renumber(df)
-    save_excel_formatted(df, EXCEL_FILE)
-    # Always (re)build the 'Daily' sheet after we write the circulars
-    try:
-        write_daily_sheet_inplace(str(EXCEL_FILE))
-    except Exception as e:
-        print(f"⚠️ Failed to update 'Daily' sheet: {e}")
-
-def append_row_to_excel(desc: str, price_thousands: float, date_str: str, link: str):
-    grade = "P1020"  # fixed rule
-    if EXCEL_FILE.exists():
-        df = pd.read_excel(EXCEL_FILE, dtype={"Sl.no.": "Int64"})
-    else:
-        df = pd.DataFrame(columns=COLUMNS)
-
-    for c in COLUMNS:
-        if c not in df.columns:
-            df[c] = pd.NA
-    df = df[COLUMNS]
-
-    df = pd.concat([df, pd.DataFrame([{
-        "Sl.no.": pd.NA,
-        "Description": desc,
-        "Grade": grade,
-        "Basic Price": price_thousands,
-        "Circular Date": date_str,
-        "Circular Link": link or "",
-    }])], ignore_index=True)
-
-    write_df(df)
 
 # ---------------- MODES ----------------
+def load_processed_set() -> set[str]:
+    if PROCESSED_SET_FILE.exists():
+        return set(x.strip() for x in PROCESSED_SET_FILE.read_text(encoding="utf-8").splitlines() if x.strip())
+    return set()
+
+def save_processed_set(s: set[str]):
+    PROCESSED_SET_FILE.write_text("\n".join(sorted(s)), encoding="utf-8")
+
 def run_normal():
+    """Daily mode:
+       - If new circular → download & add as an event.
+       - Always rebuild DAILY sheet up to today (filling missing dates from last circular)."""
+    events = load_events_from_excel_if_any()
+
+    # fetch latest url
     html = get_html(START_URL)
     pdf_url = find_latest_pdf_url(html)
-    if not pdf_url:
-        print("No PDF link found on Hindalco page. Exiting."); return
 
     latest = read_latest_json()
-    if latest.get("last_pdf_url") == pdf_url:
-        print("No new PDF (same URL). Skipping download & Excel update."); return
+    last_url = latest.get("last_pdf_url")
 
-    pdf_path = download_pdf(pdf_url)
-    write_latest_json(pdf_url, str(pdf_path))
-    print(f"Downloaded: {pdf_path.name}")
+    if pdf_url and pdf_url != last_url:
+        # new circular detected → download and add one event
+        pdf_path = download_pdf(pdf_url)
+        write_latest_json(pdf_url, str(pdf_path))
+        print(f"Downloaded: {pdf_path.name}")
 
-    last_name = LAST_PROCESSED_FILE.read_text(encoding="utf-8").strip() if LAST_PROCESSED_FILE.exists() else ""
-    if pdf_path.name == last_name:
-        print("Latest PDF already processed. Skipping Excel update."); return
+        # avoid duplicate process by filename
+        last_name = LAST_PROCESSED_FILE.read_text(encoding="utf-8").strip() if LAST_PROCESSED_FILE.exists() else ""
+        if pdf_path.name != last_name:
+            desc, raw_price = extract_target_row(pdf_path)
+            price = divide_thousands(raw_price)
+            if price is None:
+                raise RuntimeError(f"Could not parse numeric price: {raw_price!r}")
+            circular_date_str = parse_date_from_filename(pdf_path.name)
+            events = add_event(events, desc, "P1020", price, circular_date_str, pdf_url)
+            LAST_PROCESSED_FILE.write_text(pdf_path.name, encoding="utf-8")
+            processed = load_processed_set(); processed.add(pdf_path.name); save_processed_set(processed)
+            print(f"Added event for {circular_date_str}")
+        else:
+            print("Latest PDF already processed; skipping parse.")
+    else:
+        print("No new circular; will forward-fill daily series.")
 
-    desc, raw_price = extract_target_row(pdf_path)
-    price = divide_thousands(raw_price)
-    if price is None:
-        raise RuntimeError(f"Could not parse numeric price: {raw_price!r}")
-
-    date_str = parse_date_from_filename(pdf_path.name)
-    append_row_to_excel(desc, price, date_str, pdf_url)
-
-    LAST_PROCESSED_FILE.write_text(pdf_path.name, encoding="utf-8")
-    processed = load_processed_set(); processed.add(pdf_path.name); save_processed_set(processed)
-    print(f"Excel updated: {EXCEL_FILE}")
+    # rebuild daily to today (fills gaps)
+    daily_df = build_daily_from_events(events, end_date=datetime.date.today())
+    save_excel_formatted(daily_df, EXCEL_FILE)
+    print(f"Wrote daily sheet with {len(daily_df)} rows → {EXCEL_FILE}")
 
 def run_backfill():
+    """Backfill:
+       - Parse ALL PDFs in hindalco_pdfs/ into events (skip already processed files).
+       - Rebuild DAILY sheet to today."""
     pdfs = sorted(PDF_DIR.glob("*.pdf"), key=lambda p: p.stat().st_mtime)  # oldest→newest
-    if not pdfs:
-        print("No PDFs to backfill in hindalco_pdfs/."); return
-
+    events = load_events_from_excel_if_any()
     processed = load_processed_set()
-    if EXCEL_FILE.exists():
-        df = pd.read_excel(EXCEL_FILE, dtype={"Sl.no.": "Int64"})
-    else:
-        df = pd.DataFrame(columns=COLUMNS)
-    for c in COLUMNS:
-        if c not in df.columns:
-            df[c] = pd.NA
-    df = df[COLUMNS]
 
     added = 0
     for pdf_path in pdfs:
-        if pdf_path.name in processed:  # already imported
+        if pdf_path.name in processed:
             continue
         try:
             desc, raw_price = extract_target_row(pdf_path)
             price = divide_thousands(raw_price)
             if price is None:
                 print(f"Could not parse price in {pdf_path.name}; skipping."); continue
-            date_str = parse_date_from_filename(pdf_path.name)
-            df = pd.concat([df, pd.DataFrame([{
-                "Sl.no.": pd.NA,
-                "Description": desc,
-                "Grade": "P1020",
-                "Basic Price": price,
-                "Circular Date": date_str,
-                "Circular Link": "",   # unknown for historical
-            }])], ignore_index=True)
-            processed.add(pdf_path.name)
-            added += 1
+            circular_date_str = parse_date_from_filename(pdf_path.name)
+            events = add_event(events, desc, "P1020", price, circular_date_str, link="")
+            processed.add(pdf_path.name); added += 1
         except Exception as e:
             print(f"Error processing {pdf_path.name}: {e}")
 
     save_processed_set(processed)
+    daily_df = build_daily_from_events(events, end_date=datetime.date.today())
+    save_excel_formatted(daily_df, EXCEL_FILE)
     if added == 0:
-        print("Backfill complete. No new rows to add.")
+        print("Backfill complete. No new events added.")
     else:
-        write_df(df)
-        print(f"Backfill complete. Added {added} row(s). Cleaned duplicates and renumbered.")
+        print(f"Backfill complete. Added {added} event(s). Rebuilt daily sheet with {len(daily_df)} rows.")
 
 def run_repair():
-    if not EXCEL_FILE.exists():
-        print("No Excel file to repair yet."); return
-    df = pd.read_excel(EXCEL_FILE, dtype={"Sl.no.": "Int64"})
-    for c in COLUMNS:
-        if c not in df.columns:
-            df[c] = pd.NA
-    df = df[COLUMNS]
-    write_df(df)
-    print("Repair complete: duplicates removed and Sl.no. renumbered by date asc.")
+    """Repair only: rebuild daily sheet from whatever is in Excel (events or existing daily)."""
+    events = load_events_from_excel_if_any()
+    if not events:
+        print("No events present to rebuild from."); return
+    daily_df = build_daily_from_events(events, end_date=datetime.date.today())
+    save_excel_formatted(daily_df, EXCEL_FILE)
+    print(f"Repair complete. Rebuilt daily sheet with {len(daily_df)} rows.")
 
 # ---------------- ENTRYPOINT ----------------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--backfill", default="false", help="true/false (process all existing PDFs once)")
-    ap.add_argument("--repair",   default="false", help="true/false (cleanup Excel: dedupe + renumber)")
-    ap.add_argument("--daily_export", default="false", help="true/false (write Daily to data/daily.xlsx)")
+    ap.add_argument("--repair",   default="false", help="true/false (rebuild daily sheet from existing data)")
     args = ap.parse_args()
-
-    # One-time export branch (doesn't fetch/download anything)
-    if str(args.daily_export).strip().lower() in ("true", "1", "yes", "y"):
-        export_daily_to_file(str(EXCEL_FILE), str(DATA_DIR / "daily.xlsx"))
-        if EXCEL_FILE.exists():
-            write_daily_sheet_inplace(str(EXCEL_FILE))
-        return
 
     if str(args.repair).strip().lower() in ("true", "1", "yes", "y"):
         run_repair()
@@ -519,13 +398,5 @@ def main():
     else:
         run_normal()
 
-    # Always refresh 'Daily' from current Excel, even if no new PDF this run
-    try:
-        if EXCEL_FILE.exists():
-            write_daily_sheet_inplace(str(EXCEL_FILE))
-    except Exception as e:
-        print(f"⚠️ Daily refresh skipped: {e}")
-
 if __name__ == "__main__":
     main()
-
