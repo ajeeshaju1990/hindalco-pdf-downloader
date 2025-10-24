@@ -20,6 +20,10 @@ on:
         description: "Cleanup Excel (dedupe + renumber Sl.no. by date asc)"
         required: false
         default: "false"
+      daily_export:
+        description: "Create data/daily.xlsx (from current circulars)"
+        required: false
+        default: "false"
 
 permissions:
   contents: write
@@ -28,11 +32,13 @@ jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           persist-credentials: true
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -43,7 +49,22 @@ jobs:
 
       - name: Download + Extract + Update Excel
         run: |
-          python hindalco_pipeline.py --backfill "${{ github.event.inputs.backfill }}" --repair "${{ github.event.inputs.repair }}"
+          python hindalco_pipeline.py \
+            --backfill "${{ github.event.inputs.backfill }}" \
+            --repair "${{ github.event.inputs.repair }}" \
+            --daily_export "${{ github.event.inputs.daily_export }}"
+
+      # Upload the Excel outputs so you can download them from the run page
+      - name: Upload data folder (Excel + metadata)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-output
+          path: |
+            data/*.xlsx
+            data/*.txt
+            data/*.json
+          if-no-files-found: warn
 
       - name: Commit and push changes
         run: |
