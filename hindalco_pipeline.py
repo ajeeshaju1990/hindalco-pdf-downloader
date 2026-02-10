@@ -24,8 +24,8 @@ PDF_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 LATEST_JSON = pathlib.Path("latest_hindalco_pdf.json")  # stores last_pdf_url, filename, timestamp
-LAST_PROCESSED_FILE = DATA_DIR / "last_hindalco_processed.txt"  # last processed downloaded filename
-PROCESSED_SET_FILE = DATA_DIR / "processed_files.txt"  # set of filenames processed (backfill + normal)
+LAST_PROCESSED_FILE = DATA_DIR / "last_hindalco_processed.txt"
+PROCESSED_SET_FILE = DATA_DIR / "processed_files.txt"
 EXCEL_FILE = DATA_DIR / "hindalco_prices.xlsx"
 
 DAILY_COLUMNS = ["Date", "Description", "Grade", "Basic Price", "Circular Date", "Circular Link"]
@@ -35,14 +35,11 @@ UA = (
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-# Robust date extractor: matches "...-07-february-2026..." or "..._7_february_2026..."
-MONTHS_PATTERN = (
-    r"january|february|march|april|may|june|july|august|september|october|november|december"
-)
-
-# IMPORTANT: Use a plain raw-string regex (no f-string) to avoid brace mistakes.
+# ✅ FIXED: robust regex with THREE capture groups: (day) (month) (year)
+# Matches: "...-07-february-2026..." / "..._7_february_2026..." / "... 7 february 2026 ..."
 FILENAME_DATE_RE = re.compile(
-    rf"(?i)(\d{{1,2}})[\-_ ]({MONTHS_PATTERN}"
+    r"(?i)(\d{1,2})[\-_ ]+(january|february|march|april|may|june|july|august|"
+    r"september|october|november|december)[\-_ ]+(\d{4})"
 )
 
 
@@ -54,11 +51,10 @@ def get_html(url: str) -> str:
 
 
 def find_latest_pdf_url(html: str) -> str | None:
-    """Find most likely PDF link by scoring anchor text + href."""
     soup = BeautifulSoup(html, "html.parser")
     anchors = soup.find_all("a", href=True)
-    candidates: list[tuple[int, str]] = []
 
+    candidates: list[tuple[int, str]] = []
     for a in anchors:
         href = (a["href"] or "").strip()
         if not href.lower().endswith(".pdf"):
@@ -101,7 +97,7 @@ def write_latest_json(pdf_url: str, filename: str):
 
 
 def _normalize_url(u: str) -> str:
-    """Normalize URL for comparison (drop query/fragment)."""
+    """Normalize URL for stable comparisons (drop query/fragment)."""
     try:
         p = urlparse(u)
         return p._replace(query="", fragment="").geturl()
@@ -119,14 +115,15 @@ def download_pdf(pdf_url: str) -> pathlib.Path:
     with requests.get(pdf_url, headers=headers, timeout=60, stream=True, allow_redirects=True) as r:
         r.raise_for_status()
         ctype = (r.headers.get("Content-Type", "") or "").lower()
+
         if "application/pdf" not in ctype:
             raise RuntimeError(f"Expected PDF but got Content-Type={ctype!r}")
 
         name = os.path.basename(urlparse(r.url).path)
         timestamp = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         fname = f"{timestamp}_{name}" if name else f"hindalco_{timestamp}.pdf"
-        dest = PDF_DIR / fname
 
+        dest = PDF_DIR / fname
         with open(dest, "wb") as f:
             for chunk in r.iter_content(65536):
                 if chunk:
@@ -138,19 +135,16 @@ def download_pdf(pdf_url: str) -> pathlib.Path:
 # -------------------- PDF PARSE & HELPERS --------------------
 def parse_date_from_filename(filename_or_url: str) -> str:
     """
-    Extract circular date dd.mm.YYYY from:
-      20260210_045958_primary-ready-reckoner-07-february-2026.pdf
-      primary-ready-reckoner-7-february-2026.pdf
-      .../primary-ready-reckoner-07-february-2026.pdf
-
-    Fallback: today's date if parse fails.
+    Extract dd.mm.YYYY from filename or URL that contains:
+      07-february-2026  OR  7_february_2026  OR  7 february 2026
+    Falls back to today's date if parse fails.
     """
     s = filename_or_url or ""
     m = FILENAME_DATE_RE.search(s)
     if not m:
         return datetime.date.today().strftime("%d.%m.%Y")
 
-    day, mon_text, year = m.group(1), m.group(2), m.group(3)
+    day, mon_text, year = m.groups()  # ✅ now always 3 groups
 
     months = {
         "january": 1, "february": 2, "march": 3, "april": 4,
@@ -180,7 +174,7 @@ def divide_thousands(x: str | float | int) -> float | None:
 
 
 def extract_target_row(pdf_path: pathlib.Path) -> tuple[str, str]:
-    """Return (description, raw_price) for row containing P0610 + P1020 + 'EC Grade'."""
+    """Return (description, raw_price) for the row containing P0610 + P1020 + 'EC Grade'."""
     must_have = ["P0610", "P1020", "EC GRADE"]
 
     with pdfplumber.open(pdf_path) as pdf:
@@ -202,7 +196,6 @@ def extract_target_row(pdf_path: pathlib.Path) -> tuple[str, str]:
                             if re.search(r"\d", c):
                                 price = c.replace(",", "").strip()
                                 break
-
                         desc = " ".join(cells[:-1]).strip()
                         return desc, price
 
@@ -243,7 +236,10 @@ def _fmt_date_dot(d: datetime.date) -> str:
 
 
 def load_events_from_excel_if_any() -> list[dict]:
-    """Read existing Excel and extract unique circular-events."""
+    """
+    Read existing Excel and extract unique circular-events.
+    Works with old 'Sl.no.' format or new 'Date' format.
+    """
     if not EXCEL_FILE.exists():
         return []
 
@@ -337,7 +333,7 @@ def save_excel_formatted(df: pd.DataFrame, path: pathlib.Path):
     ws = wb.active
     center = Alignment(horizontal="center", vertical="center")
 
-    # Autofit widths safely (no len(float))
+    # ✅ FIXED: safe autofit widths (no len(float))
     for cidx, cname in enumerate(df.columns, start=1):
         max_len = len(str(cname))
         for v in df[cname].tolist():
@@ -405,7 +401,7 @@ def run_normal():
                 raise RuntimeError(f"Could not parse numeric price: {raw_price!r}")
 
             circular_date_str = parse_date_from_filename(pdf_path.name)
-            # If filename didn't contain a recognizable date, try from URL
+            # If not found in filename, try URL
             if circular_date_str == datetime.date.today().strftime("%d.%m.%Y"):
                 circular_date_str = parse_date_from_filename(pdf_url)
 
