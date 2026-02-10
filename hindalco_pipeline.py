@@ -23,7 +23,7 @@ DATA_DIR = pathlib.Path("data")
 PDF_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-LATEST_JSON = pathlib.Path("latest_hindalco_pdf.json")  # stores last_pdf_url, filename, timestamp
+LATEST_JSON = pathlib.Path("latest_hindalco_pdf.json")
 LAST_PROCESSED_FILE = DATA_DIR / "last_hindalco_processed.txt"
 PROCESSED_SET_FILE = DATA_DIR / "processed_files.txt"
 EXCEL_FILE = DATA_DIR / "hindalco_prices.xlsx"
@@ -35,12 +35,15 @@ UA = (
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-# ✅ FIXED: robust regex with THREE capture groups: (day) (month) (year)
-# Matches: "...-07-february-2026..." / "..._7_february_2026..." / "... 7 february 2026 ..."
+# --- filename date: "07-february-2026" etc ---
 FILENAME_DATE_RE = re.compile(
     r"(?i)(\d{1,2})[\-_ ]+(january|february|march|april|may|june|july|august|"
     r"september|october|november|december)[\-_ ]+(\d{4})"
 )
+
+# --- excel date: accept dd.mm.yyyy OR dd-mm-yyyy OR dd/mm/yyyy (and even embedded in text) ---
+EXCEL_DATE_RE = re.compile(r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})")
+URL_RE = re.compile(r"(https?://\S+)")
 
 
 # -------------------- HTML & DOWNLOAD --------------------
@@ -53,13 +56,12 @@ def get_html(url: str) -> str:
 def find_latest_pdf_url(html: str) -> str | None:
     soup = BeautifulSoup(html, "html.parser")
     anchors = soup.find_all("a", href=True)
-
     candidates: list[tuple[int, str]] = []
+
     for a in anchors:
         href = (a["href"] or "").strip()
         if not href.lower().endswith(".pdf"):
             continue
-
         abs_url = urljoin(START_URL, href)
         text = (a.get_text(" ", strip=True) or "").lower()
 
@@ -68,7 +70,6 @@ def find_latest_pdf_url(html: str) -> str | None:
             score += 2
         if any(k in href.lower() for k in ("ready", "reckoner", "price")):
             score += 2
-
         candidates.append((score, abs_url))
 
     if not candidates:
@@ -97,7 +98,6 @@ def write_latest_json(pdf_url: str, filename: str):
 
 
 def _normalize_url(u: str) -> str:
-    """Normalize URL for stable comparisons (drop query/fragment)."""
     try:
         p = urlparse(u)
         return p._replace(query="", fragment="").geturl()
@@ -111,19 +111,17 @@ def download_pdf(pdf_url: str) -> pathlib.Path:
         "Accept": "application/pdf,*/*;q=0.9",
         "Referer": START_URL,
     }
-
     with requests.get(pdf_url, headers=headers, timeout=60, stream=True, allow_redirects=True) as r:
         r.raise_for_status()
         ctype = (r.headers.get("Content-Type", "") or "").lower()
-
         if "application/pdf" not in ctype:
             raise RuntimeError(f"Expected PDF but got Content-Type={ctype!r}")
 
         name = os.path.basename(urlparse(r.url).path)
         timestamp = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         fname = f"{timestamp}_{name}" if name else f"hindalco_{timestamp}.pdf"
-
         dest = PDF_DIR / fname
+
         with open(dest, "wb") as f:
             for chunk in r.iter_content(65536):
                 if chunk:
@@ -132,26 +130,19 @@ def download_pdf(pdf_url: str) -> pathlib.Path:
         return dest
 
 
-# -------------------- PDF PARSE & HELPERS --------------------
+# -------------------- DATE HELPERS --------------------
 def parse_date_from_filename(filename_or_url: str) -> str:
-    """
-    Extract dd.mm.YYYY from filename or URL that contains:
-      07-february-2026  OR  7_february_2026  OR  7 february 2026
-    Falls back to today's date if parse fails.
-    """
     s = filename_or_url or ""
     m = FILENAME_DATE_RE.search(s)
     if not m:
         return datetime.date.today().strftime("%d.%m.%Y")
 
-    day, mon_text, year = m.groups()  # ✅ now always 3 groups
-
+    day, mon_text, year = m.groups()
     months = {
         "january": 1, "february": 2, "march": 3, "april": 4,
         "may": 5, "june": 6, "july": 7, "august": 8,
         "september": 9, "october": 10, "november": 11, "december": 12,
     }
-
     mm = months.get(mon_text.lower())
     if not mm:
         return datetime.date.today().strftime("%d.%m.%Y")
@@ -163,6 +154,33 @@ def parse_date_from_filename(filename_or_url: str) -> str:
         return datetime.date.today().strftime("%d.%m.%Y")
 
 
+def _extract_excel_date(s) -> datetime.date | None:
+    """Extract a date from messy Excel cells: accepts dd.mm.yyyy / dd-mm-yyyy / dd/mm/yyyy."""
+    if s is None or (isinstance(s, float) and pd.isna(s)):
+        return None
+    txt = str(s)
+    m = EXCEL_DATE_RE.search(txt)
+    if not m:
+        return None
+    dd, mm, yyyy = m.group(1), m.group(2), m.group(3)
+    try:
+        return datetime.date(int(yyyy), int(mm), int(dd))
+    except ValueError:
+        return None
+
+
+def _extract_first_url(*vals) -> str:
+    """Return first http(s) URL found in any of the provided strings."""
+    for v in vals:
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            continue
+        m = URL_RE.search(str(v))
+        if m:
+            return m.group(1)
+    return ""
+
+
+# -------------------- PDF PARSE --------------------
 def divide_thousands(x: str | float | int) -> float | None:
     s = str(x).replace(",", "").strip()
     if not s:
@@ -174,11 +192,9 @@ def divide_thousands(x: str | float | int) -> float | None:
 
 
 def extract_target_row(pdf_path: pathlib.Path) -> tuple[str, str]:
-    """Return (description, raw_price) for the row containing P0610 + P1020 + 'EC Grade'."""
     must_have = ["P0610", "P1020", "EC GRADE"]
 
     with pdfplumber.open(pdf_path) as pdf:
-        # 1) try tables
         for page in pdf.pages:
             try:
                 tables = page.extract_tables()
@@ -189,7 +205,6 @@ def extract_target_row(pdf_path: pathlib.Path) -> tuple[str, str]:
                 for row in tbl:
                     cells = [(c or "").strip() for c in row]
                     line = " ".join(cells).upper()
-
                     if all(x in line for x in must_have):
                         price = ""
                         for c in reversed(cells):
@@ -199,7 +214,6 @@ def extract_target_row(pdf_path: pathlib.Path) -> tuple[str, str]:
                         desc = " ".join(cells[:-1]).strip()
                         return desc, price
 
-        # 2) fallback: text lines on first page
         words = pdf.pages[0].extract_words(use_text_flow=True, keep_blank_chars=False) if pdf.pages else []
         lines: dict[float, list[dict]] = {}
         for w in words:
@@ -209,7 +223,6 @@ def extract_target_row(pdf_path: pathlib.Path) -> tuple[str, str]:
         for _, wlist in lines.items():
             text_line = " ".join([w["text"] for w in sorted(wlist, key=lambda x: x["x0"])])
             u = text_line.upper()
-
             if all(x in u for x in must_have):
                 m = re.search(r"(\d{5,7}(?:\.\d+)?)\s*$", text_line.replace(",", ""))
                 price = m.group(1) if m else ""
@@ -220,13 +233,6 @@ def extract_target_row(pdf_path: pathlib.Path) -> tuple[str, str]:
 
 
 # -------------------- EVENTS ↔ DAILY --------------------
-def _to_dt(s: str) -> datetime.date | None:
-    try:
-        return datetime.datetime.strptime(str(s), "%d.%m.%Y").date()
-    except Exception:
-        return None
-
-
 def _fmt_date_dash(d: datetime.date) -> str:
     return d.strftime("%d-%m-%Y")
 
@@ -237,8 +243,10 @@ def _fmt_date_dot(d: datetime.date) -> str:
 
 def load_events_from_excel_if_any() -> list[dict]:
     """
-    Read existing Excel and extract unique circular-events.
-    Works with old 'Sl.no.' format or new 'Date' format.
+    Robustly read Excel and extract unique events.
+    - Accepts Circular Date as dd.mm.yyyy OR dd-mm-yyyy OR dd/mm/yyyy
+    - If date cell contains extra junk (e.g., URL), extracts the first date
+    - If Circular Link missing, tries to extract URL from other cells
     """
     if not EXCEL_FILE.exists():
         return []
@@ -251,15 +259,30 @@ def load_events_from_excel_if_any() -> list[dict]:
         if k not in df.columns:
             df[k] = pd.NA
 
-    if "Sl.no." in cols:
-        ev = df[keep].copy()
-    else:
-        ev = df[keep].copy()
-        ev = ev.sort_values(by="Circular Date").drop_duplicates(subset=["Circular Date"], keep="last")
+    # If already daily: reduce to unique circular events by Circular Date (keep last)
+    ev = df[keep].copy()
+    # parse circular date robustly
+    ev["Circular Date DT"] = ev["Circular Date"].apply(_extract_excel_date)
 
+    # Also try to extract date from "Circular Link" cell if date missing (some edits merge cells)
+    miss = ev["Circular Date DT"].isna()
+    if miss.any():
+        ev.loc[miss, "Circular Date DT"] = ev.loc[miss, "Circular Link"].apply(_extract_excel_date)
+
+    ev = ev.dropna(subset=["Circular Date DT"])
+
+    # numeric price
     ev["Basic Price"] = pd.to_numeric(ev["Basic Price"], errors="coerce")
-    ev["Circular Date DT"] = ev["Circular Date"].apply(_to_dt)
-    ev = ev.dropna(subset=["Circular Date DT"]).sort_values("Circular Date DT")
+
+    # fill missing URL from any cell
+    ev["Circular Link"] = ev.apply(
+        lambda r: r["Circular Link"] if isinstance(r["Circular Link"], str) and r["Circular Link"].startswith("http")
+        else _extract_first_url(r["Circular Link"], r["Circular Date"], r["Description"]),
+        axis=1
+    )
+
+    # dedupe by circular date keep last
+    ev = ev.sort_values(by="Circular Date DT").drop_duplicates(subset=["Circular Date DT"], keep="last")
 
     events = []
     for _, r in ev.iterrows():
@@ -270,23 +293,18 @@ def load_events_from_excel_if_any() -> list[dict]:
             "cdate": r["Circular Date DT"],
             "clink": r.get("Circular Link", "") or "",
         })
+    events.sort(key=lambda e: e["cdate"])
     return events
 
 
-def add_event(events: list[dict], desc: str, grade: str, price: float, circular_date_str: str, link: str) -> list[dict]:
-    """Merge a new event; keep newest info for same Circular Date."""
-    cdt = _to_dt(circular_date_str)
-    if not cdt:
-        return events
-
-    events = [e for e in events if e["cdate"] != cdt]
-    events.append({"desc": desc, "grade": grade or "P1020", "price": price, "cdate": cdt, "clink": link or ""})
+def add_event(events: list[dict], desc: str, grade: str, price: float, circular_date: datetime.date, link: str) -> list[dict]:
+    events = [e for e in events if e["cdate"] != circular_date]
+    events.append({"desc": desc, "grade": grade or "P1020", "price": price, "cdate": circular_date, "clink": link or ""})
     events.sort(key=lambda e: e["cdate"])
     return events
 
 
 def build_daily_from_events(events: list[dict], end_date: datetime.date | None = None) -> pd.DataFrame:
-    """Create daily rows forward-filled from circular events."""
     if not events:
         return pd.DataFrame(columns=DAILY_COLUMNS)
 
@@ -322,7 +340,6 @@ def build_daily_from_events(events: list[dict], end_date: datetime.date | None =
 
 # -------------------- WRITE EXCEL (formatting) --------------------
 def save_excel_formatted(df: pd.DataFrame, path: pathlib.Path):
-    """Write df to Excel with formatting; robust to floats/NaN/None."""
     if df is None or df.empty:
         pd.DataFrame(columns=DAILY_COLUMNS).to_excel(path, index=False)
         return
@@ -333,7 +350,7 @@ def save_excel_formatted(df: pd.DataFrame, path: pathlib.Path):
     ws = wb.active
     center = Alignment(horizontal="center", vertical="center")
 
-    # ✅ FIXED: safe autofit widths (no len(float))
+    # safe autofit widths
     for cidx, cname in enumerate(df.columns, start=1):
         max_len = len(str(cname))
         for v in df[cname].tolist():
@@ -364,7 +381,7 @@ def save_excel_formatted(df: pd.DataFrame, path: pathlib.Path):
     wb.save(path)
 
 
-# -------------------- MODES --------------------
+# -------------------- STATE FILES --------------------
 def load_processed_set() -> set[str]:
     if PROCESSED_SET_FILE.exists():
         return set(x.strip() for x in PROCESSED_SET_FILE.read_text(encoding="utf-8").splitlines() if x.strip())
@@ -375,8 +392,8 @@ def save_processed_set(s: set[str]):
     PROCESSED_SET_FILE.write_text("\n".join(sorted(s)), encoding="utf-8")
 
 
+# -------------------- MODES --------------------
 def run_normal():
-    """Normal scheduled mode: check latest URL, download if new, update events + daily Excel."""
     events = load_events_from_excel_if_any()
 
     html = get_html(START_URL)
@@ -385,10 +402,7 @@ def run_normal():
     latest = read_latest_json()
     last_url = latest.get("last_pdf_url", "")
 
-    pdf_url_norm = _normalize_url(pdf_url) if pdf_url else ""
-    last_url_norm = _normalize_url(last_url) if last_url else ""
-
-    if pdf_url and pdf_url_norm != last_url_norm:
+    if pdf_url and _normalize_url(pdf_url) != _normalize_url(last_url):
         pdf_path = download_pdf(pdf_url)
         write_latest_json(pdf_url, str(pdf_path))
         print(f"Downloaded: {pdf_path.name}")
@@ -400,12 +414,12 @@ def run_normal():
             if price is None:
                 raise RuntimeError(f"Could not parse numeric price: {raw_price!r}")
 
-            circular_date_str = parse_date_from_filename(pdf_path.name)
-            # If not found in filename, try URL
-            if circular_date_str == datetime.date.today().strftime("%d.%m.%Y"):
-                circular_date_str = parse_date_from_filename(pdf_url)
+            cdate_str = parse_date_from_filename(pdf_path.name)
+            cdate_dt = _extract_excel_date(cdate_str)  # reuse parser
+            if not cdate_dt:
+                cdate_dt = datetime.date.today()
 
-            events = add_event(events, desc, "P1020", price, circular_date_str, pdf_url)
+            events = add_event(events, desc, "P1020", price, cdate_dt, pdf_url)
 
             LAST_PROCESSED_FILE.write_text(pdf_path.name, encoding="utf-8")
 
@@ -413,7 +427,7 @@ def run_normal():
             processed.add(pdf_path.name)
             save_processed_set(processed)
 
-            print(f"Added event for {circular_date_str}")
+            print(f"Added event for {cdate_dt.strftime('%d.%m.%Y')}")
         else:
             print("Latest PDF already processed; skipping parse.")
     else:
@@ -425,14 +439,32 @@ def run_normal():
 
 
 def run_backfill():
-    """Backfill: parse all PDFs in hindalco_pdfs/ not in processed_files.txt and rebuild daily Excel."""
-    pdfs = sorted(PDF_DIR.glob("*.pdf"), key=lambda p: p.stat().st_mtime)  # oldest→newest
+    """
+    Backfill:
+    - Parse ALL PDFs in hindalco_pdfs/
+    - BUT: do NOT skip a PDF just because it's in processed_files.txt
+      if its circular date is NOT present in current events.
+    """
+    pdfs = sorted(PDF_DIR.glob("*.pdf"), key=lambda p: p.stat().st_mtime)
     events = load_events_from_excel_if_any()
+    events_cdates = set(e["cdate"] for e in events)
+
     processed = load_processed_set()
     added = 0
 
     for pdf_path in pdfs:
-        if pdf_path.name in processed:
+        cdate_str = parse_date_from_filename(pdf_path.name)
+        cdate_dt = _extract_excel_date(cdate_str)
+
+        # If we cannot detect date, fall back to mtime date (rare)
+        if not cdate_dt:
+            cdate_dt = datetime.date.fromtimestamp(pdf_path.stat().st_mtime)
+
+        # ✅ key change:
+        # Skip only if BOTH:
+        #  - file is in processed list AND
+        #  - event for that circular date already exists
+        if pdf_path.name in processed and cdate_dt in events_cdates:
             continue
 
         try:
@@ -442,8 +474,8 @@ def run_backfill():
                 print(f"Could not parse price in {pdf_path.name}; skipping.")
                 continue
 
-            circular_date_str = parse_date_from_filename(pdf_path.name)
-            events = add_event(events, desc, "P1020", price, circular_date_str, link="")
+            events = add_event(events, desc, "P1020", price, cdate_dt, link="")
+            events_cdates.add(cdate_dt)
 
             processed.add(pdf_path.name)
             added += 1
@@ -463,7 +495,6 @@ def run_backfill():
 
 
 def run_repair():
-    """Repair only: rebuild daily sheet from Excel events."""
     events = load_events_from_excel_if_any()
     if not events:
         print("No events present to rebuild from.")
