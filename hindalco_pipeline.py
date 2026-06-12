@@ -215,42 +215,109 @@ def divide_thousands(x: str | float | int) -> float | None:
         return None
 
 
+def _extract_price_from_text(text: str) -> str:
+    """
+    Extract the Basic Price from a Hindalco product row.
+
+    Handles both old/new PDF layouts where pdfplumber may return:
+      1) separate columns: [description, price]
+      2) one merged cell: "... Cast Bar 4,29,250"
+      3) de-comma'd text: "... Cast Bar 404000"
+
+    Returns the raw numeric price string (not divided by 1000).
+    """
+    s = str(text or "").replace("\xa0", " ").strip()
+    if not s:
+        return ""
+
+    # Prefer a number at the end of the row; Hindalco prices are normally 5-7 digits
+    # and may contain Indian comma grouping, e.g. 4,29,250.
+    matches = re.findall(r"(?<!\d)(\d{1,3}(?:,\d{2,3})+|\d{5,7})(?:\.\d+)?(?!\d)", s)
+    if matches:
+        return matches[-1].replace(",", "").strip()
+    return ""
+
+
 def extract_target_row(pdf_path: pathlib.Path) -> tuple[str, str]:
+    """
+    Locate the P0610/P1020 EC Grade Ingot & Sow / Cast Bar row and return
+    (description, raw_basic_price).
+
+    This is intentionally tolerant because Hindalco's PDF layout changed: in
+    some files pdfplumber extracts the whole product row as a single cell,
+    so the previous logic returned the entire row as the price and failed.
+    """
     must_have = ["P0610", "P1020", "EC GRADE"]
 
+    def is_target(line: str) -> bool:
+        u = (line or "").upper()
+        return all(x in u for x in must_have)
+
+    def clean_desc(line: str, price: str) -> str:
+        desc = str(line or "").strip()
+        if price:
+            # Remove only the final price occurrence from description.
+            # Supports Indian comma grouping (4,24,250), western grouping (424,250),
+            # or no commas (424250 / 404000).
+            desc = re.sub(
+                r"\s*(?:\d{1,3}(?:,\d{2,3})+|\d{5,7})(?:\.\d+)?\s*$",
+                "",
+                desc,
+            )
+        return re.sub(r"\s+", " ", desc).strip()
+
     with pdfplumber.open(pdf_path) as pdf:
+        # 1) Try table extraction first.
         for page in pdf.pages:
             try:
                 tables = page.extract_tables()
             except Exception:
                 tables = []
+
             for tbl in tables or []:
-                for row in tbl:
-                    cells = [(c or "").strip() for c in row]
-                    line = " ".join(cells).upper()
-                    if all(x in line for x in must_have):
-                        price = ""
-                        for c in reversed(cells):
-                            if re.search(r"\d", c):
-                                price = c.replace(",", "").strip()
-                                break
-                        desc = " ".join(cells[:-1]).strip()
-                        return desc, price
+                for row in tbl or []:
+                    cells = [(c or "").strip() for c in (row or [])]
+                    line = " ".join(c for c in cells if c).strip()
+                    if not is_target(line):
+                        continue
 
-        words = pdf.pages[0].extract_words(use_text_flow=True, keep_blank_chars=False) if pdf.pages else []
-        lines: dict[float, list[dict]] = {}
-        for w in words:
-            y = round(w["top"], 1)
-            lines.setdefault(y, []).append(w)
+                    # New layout often gives one merged cell: description + price.
+                    price = _extract_price_from_text(line)
+                    if price:
+                        return clean_desc(line, price), price
 
-        for _, wlist in lines.items():
-            text_line = " ".join([w["text"] for w in sorted(wlist, key=lambda x: x["x0"])])
-            u = text_line.upper()
-            if all(x in u for x in must_have):
-                m = re.search(r"(\d{5,7}(?:\.\d+)?)\s*$", text_line.replace(",", ""))
-                price = m.group(1) if m else ""
-                desc = text_line.strip()
-                return desc, price
+                    # Fallback for genuine multi-column tables.
+                    for c in reversed(cells):
+                        price = _extract_price_from_text(c)
+                        if price:
+                            return clean_desc(line, price), price
+
+        # 2) Try normal extracted page text.
+        for page in pdf.pages:
+            text = page.extract_text() or ""
+            for text_line in text.splitlines():
+                if is_target(text_line):
+                    price = _extract_price_from_text(text_line)
+                    if price:
+                        return clean_desc(text_line, price), price
+
+        # 3) Last fallback: group words by y-coordinate.
+        for page in pdf.pages:
+            try:
+                words = page.extract_words(use_text_flow=True, keep_blank_chars=False)
+            except Exception:
+                words = []
+            lines: dict[float, list[dict]] = {}
+            for w in words:
+                y = round(w.get("top", 0), 1)
+                lines.setdefault(y, []).append(w)
+
+            for _, wlist in lines.items():
+                text_line = " ".join([w["text"] for w in sorted(wlist, key=lambda x: x["x0"])])
+                if is_target(text_line):
+                    price = _extract_price_from_text(text_line)
+                    if price:
+                        return clean_desc(text_line, price), price
 
     raise RuntimeError(f"Could not find target row in: {pdf_path.name}")
 
